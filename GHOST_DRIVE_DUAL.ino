@@ -75,7 +75,7 @@ char rcCmd[4]     = "S";  // Drive command: F, B, L, R, FL, FR, BL, BR, S
 // ─── Telemetry Globals ────────────────────────────────────────
 volatile long lastDistance = 999;
 volatile int lastIR = 4095;
-int currentServoAngle = -1;
+int currentServoAngle = 90;
 volatile long dL_dist = 999;
 volatile long dC_dist = 999;
 volatile long dR_dist = 999;
@@ -759,6 +759,44 @@ void handleRoot() {
       transform: scale(0.93);
       box-shadow: 0 0 12px rgba(6, 182, 212, 0.3);
     }
+    /* RC Transmitter Control Buttons */
+    .rc-ctrl-btn {
+      background: rgba(99, 102, 241, 0.07);
+      border: 1.5px solid rgba(99, 102, 241, 0.22);
+      border-radius: 14px;
+      color: var(--accent-primary);
+      font-size: 20px;
+      font-weight: 800;
+      height: 72px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      outline: none;
+      font-family: inherit;
+      transition: background 0.1s, transform 0.08s, box-shadow 0.1s;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      width: 100%;
+    }
+    .rc-ctrl-btn small { font-size: 8px; font-weight: 700; letter-spacing: 0.08em; opacity: 0.7; }
+    .rc-ctrl-btn:active, .rc-ctrl-btn.pressed {
+      background: rgba(99, 102, 241, 0.28);
+      transform: scale(0.91);
+      box-shadow: 0 0 18px rgba(99, 102, 241, 0.4);
+    }
+    .rc-stop-btn {
+      background: rgba(244, 63, 94, 0.07);
+      border-color: rgba(244, 63, 94, 0.22);
+      color: var(--accent-danger);
+    }
+    .rc-stop-btn:active, .rc-stop-btn.pressed {
+      background: rgba(244, 63, 94, 0.28);
+      box-shadow: 0 0 18px rgba(244, 63, 94, 0.4);
+    }
   </style>
 </head>
 <body>
@@ -835,7 +873,7 @@ void handleRoot() {
     </button>
     <div class='tab-glider'></div>
   </div>
-  
+
   <!-- Autonomous Tab Page -->
   <section class='card panel-oa active' id='panel-oa'>
     <h2 class='card-title'>AUTONOMOUS NAVIGATOR</h2>
@@ -843,53 +881,50 @@ void handleRoot() {
       Car running in autonomous safety mode. Reduced speeds engaged for maximum reaction windows. Scans will run dynamically at path obstructions.
     </div>
   </section>
-  
-  <!-- Manual Tab Page -->
+
+  <!-- RC Drive Tab Page -->
   <section class='card panel-rc' id='panel-rc'>
-    <div class='controls-layout'>
-      <!-- Interactive Joystick Controller -->
-      <div class='joystick-container'>
-        <h2 class='card-title'>360 VECTOR JOYSTICK</h2>
-        <div class='joystick-zone'>
-          <div class='joystick-base'>
-            <div class='joystick-handle' id='joy-handle'></div>
+    <h2 class='card-title'>RC TRANSMITTER</h2>
+    <!-- Direction pad: 3x3 grid, centre = STOP -->
+    <div style='display:grid; grid-template-columns:repeat(3,1fr); gap:10px; max-width:260px; margin:0 auto 18px;'>
+      <div></div>
+      <button class='rc-ctrl-btn' id='rc-fwd'>&#9650;<br><small>FORWARD</small></button>
+      <div></div>
+      <button class='rc-ctrl-btn' id='rc-left'>&#9668;<br><small>LEFT</small></button>
+      <button class='rc-ctrl-btn rc-stop-btn' id='rc-stop'>&#9632;<br><small>STOP</small></button>
+      <button class='rc-ctrl-btn' id='rc-right'>&#9658;<br><small>RIGHT</small></button>
+      <div></div>
+      <button class='rc-ctrl-btn' id='rc-rev'>&#9660;<br><small>REVERSE</small></button>
+      <div></div>
+    </div>
+    <!-- Horn & sliders -->
+    <div class='actions-panel'>
+      <button class='btn-horn' id='btn-horn'>
+        <svg viewBox='0 0 24 24'><path d='M11 5L6 9H2v6h4l5 4V5z'/><path d='M19.07 4.93a10 10 0 0 1 0 14.14'/><path d='M15.54 8.46a5 5 0 0 1 0 7.07'/></svg>
+        <span>TRIGGER HORN</span>
+      </button>
+      <div class='slider-group'>
+        <div class='slider-header'>
+          <div class='slider-title'>
+            <svg class='slider-icon' viewBox='0 0 24 24'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>
+            <span>RC DRIVE VELOCITY</span>
           </div>
+          <span class='slider-value' id='val-speed'>78%</span>
+        </div>
+        <div class='range-input-wrap'>
+          <input type='range' id='slide-speed' min='20' max='100' value='78'>
         </div>
       </div>
-      
-      <!-- Range sliders & horn button -->
-      <div class='actions-panel'>
-        <button class='btn-horn' id='btn-horn'>
-          <svg viewBox='0 0 24 24'><path d='M11 5L6 9H2v6h4l5 4V5z'/><path d='M19.07 4.93a10 10 0 0 1 0 14.14'/><path d='M15.54 8.46a5 5 0 0 1 0 7.07'/></svg>
-          <span>TRIGGER HORN</span>
-        </button>
-        
-        <!-- Speed Limit Slider -->
-        <div class='slider-group'>
-          <div class='slider-header'>
-            <div class='slider-title'>
-              <svg class='slider-icon' viewBox='0 0 24 24'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>
-              <span>RC DRIVE VELOCITY</span>
-            </div>
-            <span class='slider-value' id='val-speed'>78%</span>
+      <div class='slider-group'>
+        <div class='slider-header'>
+          <div class='slider-title'>
+            <svg class='slider-icon' viewBox='0 0 24 24'><path d='M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z'/><circle cx='12' cy='12' r='3'/></svg>
+            <span>RADAR DECK SERVO</span>
           </div>
-          <div class='range-input-wrap'>
-            <input type='range' id='slide-speed' min='20' max='100' value='78'>
-          </div>
+          <span class='slider-value' id='val-servo'>90&deg;</span>
         </div>
-        
-        <!-- Camera Servo Angle Slider -->
-        <div class='slider-group'>
-          <div class='slider-header'>
-            <div class='slider-title'>
-              <svg class='slider-icon' viewBox='0 0 24 24'><path d='M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z'/><circle cx='12' cy='12' r='3'/></svg>
-              <span>RADAR DECK SERVO</span>
-            </div>
-            <span class='slider-value' id='val-servo'>90°</span>
-          </div>
-          <div class='range-input-wrap'>
-            <input type='range' id='slide-servo' min='0' max='180' value='90'>
-          </div>
+        <div class='range-input-wrap'>
+          <input type='range' id='slide-servo' min='0' max='180' value='90'>
         </div>
       </div>
     </div>
@@ -1051,89 +1086,55 @@ void handleRoot() {
     }
   };
   
-  // Virtual Joystick Logic
-  const handle = document.getElementById('joy-handle');
-  const joyBase = handle.parentElement;
-  let isDragging = false;
-  let startX = 0, startY = 0;
-  const maxDistance = 45; // max displacement boundary (px)
+  // RC Transmitter Button State Tracking
+  // Supports simultaneous presses: FWD+LEFT = FL, FWD+RIGHT = FR, etc.
+  const rcState = { fwd: false, rev: false, left: false, right: false };
   
-  const initJoystick = () => {
-    joyBase.addEventListener('pointerdown', (e) => {
+  const calcRcCmd = () => {
+    if (rcState.fwd  && rcState.left)  return 'FL';
+    if (rcState.fwd  && rcState.right) return 'FR';
+    if (rcState.rev  && rcState.left)  return 'BL';
+    if (rcState.rev  && rcState.right) return 'BR';
+    if (rcState.fwd)   return 'F';
+    if (rcState.rev)   return 'B';
+    if (rcState.left)  return 'L';
+    if (rcState.right) return 'R';
+    return 'S';
+  };
+  
+  const attachRcBtn = (id, key) => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      isDragging = true;
-      joyBase.setPointerCapture(e.pointerId);
-      
-      const rect = joyBase.getBoundingClientRect();
-      startX = rect.left + rect.width / 2;
-      startY = rect.top + rect.height / 2;
-      
-      updateJoyPos(e.clientX, e.clientY);
+      btn.setPointerCapture(e.pointerId);
+      rcState[key] = true;
+      btn.classList.add('pressed');
+      sendCmd(calcRcCmd());
     });
-    
-    joyBase.addEventListener('pointermove', (e) => {
-      if (!isDragging) return;
-      e.preventDefault();
-      updateJoyPos(e.clientX, e.clientY);
-    });
-    
-    const endDrag = (e) => {
-      if (!isDragging) return;
-      isDragging = false;
-      joyBase.releasePointerCapture(e.pointerId);
-      
-      handle.style.transform = 'translate(0px, 0px)';
-      sendCmd('S');
+    const release = () => {
+      rcState[key] = false;
+      btn.classList.remove('pressed');
+      sendCmd(calcRcCmd());
     };
-    
-    joyBase.addEventListener('pointerup', endDrag);
-    joyBase.addEventListener('pointercancel', endDrag);
+    btn.addEventListener('pointerup', release);
+    btn.addEventListener('pointerleave', release);
+    btn.addEventListener('pointercancel', release);
   };
   
-  const updateJoyPos = (clientX, clientY) => {
-    let dx = clientX - startX;
-    let dy = clientY - startY;
-    
-    const distance = Math.sqrt(dx * dx + dy * dy);
-    if (distance > maxDistance) {
-      dx = (dx / distance) * maxDistance;
-      dy = (dy / distance) * maxDistance;
-    }
-    
-    handle.style.transform = `translate(${dx}px, ${dy}px)`;
-    
-    const nx = dx / maxDistance;
-    const ny = -dy / maxDistance;
-    
-    let cmd = 'S';
-    const deadzone = 0.35;
-    
-    if (Math.abs(nx) < deadzone && Math.abs(ny) < deadzone) {
-      cmd = 'S';
-    } else {
-      const angle = Math.atan2(ny, nx) * 180 / Math.PI;
-      
-      if (angle >= -22.5 && angle < 22.5) {
-        cmd = 'R';
-      } else if (angle >= 22.5 && angle < 67.5) {
-        cmd = 'FR';
-      } else if (angle >= 67.5 && angle < 112.5) {
-        cmd = 'F';
-      } else if (angle >= 112.5 && angle < 157.5) {
-        cmd = 'FL';
-      } else if (angle >= 157.5 || angle < -157.5) {
-        cmd = 'L';
-      } else if (angle >= -157.5 && angle < -112.5) {
-        cmd = 'BL';
-      } else if (angle >= -112.5 && angle < -67.5) {
-        cmd = 'B';
-      } else if (angle >= -67.5 && angle < -22.5) {
-        cmd = 'BR';
-      }
-    }
-    sendCmd(cmd);
-  };
-  initJoystick();
+  attachRcBtn('rc-fwd',   'fwd');
+  attachRcBtn('rc-rev',   'rev');
+  attachRcBtn('rc-left',  'left');
+  attachRcBtn('rc-right', 'right');
+  
+  const rcStopBtn = document.getElementById('rc-stop');
+  if (rcStopBtn) {
+    rcStopBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      Object.keys(rcState).forEach(k => rcState[k] = false);
+      sendCmd('S');
+    });
+  }
   
   // Horn Button Touch/Pointer listeners
   const horn = document.getElementById('btn-horn');
@@ -1295,7 +1296,8 @@ void handleRoot() {
     }
     
     // Update radar sweeps target trackers
-    currentAngle = data.angle;
+    window._liveRadarDist = (data.dist && data.dist < 999) ? data.dist : 0;
+    currentAngle = (data.angle && data.angle > 0) ? data.angle : 90;
     
     // Push target readings to decay array
     addRadarTarget(data.angle, data.dist);
@@ -1344,14 +1346,13 @@ void handleRoot() {
   let targetSpots = []; // holds target markers {angle, dist, life}
   
   const addRadarTarget = (angle, dist) => {
-    if (dist <= 0 || dist >= 100) return;
-    const radAngle = angle;
-    const existing = targetSpots.find(t => Math.abs(t.angle - radAngle) < 15);
+    if (dist <= 0 || dist >= 250) return;   // show obstacles up to 250 cm
+    const existing = targetSpots.find(t => Math.abs(t.angle - angle) < 15);
     if (existing) {
       existing.dist = dist;
       existing.life = 1.0;
     } else {
-      targetSpots.push({ angle: radAngle, dist: dist, life: 1.0 });
+      targetSpots.push({ angle: angle, dist: dist, life: 1.0 });
     }
   };
   
@@ -1368,9 +1369,9 @@ void handleRoot() {
     ctx.strokeStyle = 'rgba(16, 185, 129, 0.12)';
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
-    [30, 60, 90].forEach(rVal => {
+    [50, 100, 200].forEach(rCm => {       // rings at 50 / 100 / 200 cm
       ctx.beginPath();
-      ctx.arc(cx, cy, (rVal / 100) * maxR, 0, 2 * Math.PI);
+      ctx.arc(cx, cy, (rCm / 250) * maxR, 0, 2 * Math.PI);
       ctx.stroke();
     });
     
@@ -1423,11 +1424,34 @@ void handleRoot() {
     ctx.lineTo(cx + maxR * Math.cos(beamAngle), cy - maxR * Math.sin(beamAngle));
     ctx.stroke();
     
+    // Live distance dot at current servo position — always visible
+    const liveDist = window._liveRadarDist || 0;
+    if (liveDist > 0 && liveDist < 300) {
+      const dotR = Math.min((liveDist / 250) * maxR, maxR - 3);
+      const dotX = cx + dotR * Math.cos(beamAngle);
+      const dotY = cy - dotR * Math.sin(beamAngle);
+      ctx.beginPath();
+      ctx.arc(dotX, dotY, 5.5, 0, 2 * Math.PI);
+      ctx.fillStyle = `rgba(${rgbColor}, 0.95)`;
+      ctx.shadowColor = `rgba(${rgbColor}, 0.9)`;
+      ctx.shadowBlur = 14;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    } else {
+      // No obstacle: faint dot at beam tip so beam is always visible
+      const tipX = cx + (maxR - 4) * Math.cos(beamAngle);
+      const tipY = cy - (maxR - 4) * Math.sin(beamAngle);
+      ctx.beginPath();
+      ctx.arc(tipX, tipY, 3, 0, 2 * Math.PI);
+      ctx.fillStyle = `rgba(${rgbColor}, 0.18)`;
+      ctx.fill();
+    }
+    
     // Decay update & draw warning markers
     targetSpots.forEach(t => t.life -= 0.012);
     targetSpots = targetSpots.filter(t => t.life > 0);
     targetSpots.forEach(t => {
-      const r = (t.dist / 100) * maxR;
+      const r = (Math.min(t.dist, 250) / 250) * maxR;  // scaled to 250cm
       const rAngle = t.angle * Math.PI / 180;
       const tx = cx + r * Math.cos(rAngle);
       const ty = cy - r * Math.sin(rAngle);
@@ -1795,7 +1819,7 @@ void loop() {
     int ir = analogRead(IR_PIN);
     lastDistance = dC;
     lastIR = ir;
-    dC_dist = dC; // Update center distance for radar
+    dC_dist = dC;
     // Edge/cliff protection
     if (ir < IR_THRESHOLD) {
       stopAll(); beep(60);
@@ -1819,23 +1843,18 @@ void loop() {
     delay(20);
   } else if (carMode == MODE_RC) {
     // ── RC Web Control Mode ──────────────────────────────────
-    // Buzzer control
     digitalWrite(BUZZER, rcHornOn ? HIGH : LOW);
-    // Apply motor drive commands
     applyRcCmd(rcCmd, rcSpeed);
-    // Update telemetry parameters asynchronously in the background
     static unsigned long lastSensorUpdate = 0;
     if (millis() - lastSensorUpdate > 150) {
       lastSensorUpdate = millis();
-      lastDistance = singlePingCM(15000UL); // Single ping with 15ms timeout (approx 250cm range)
+      lastDistance = singlePingCM(15000UL);
       lastIR = analogRead(IR_PIN);
     }
     delay(15);
   } else if (carMode == MODE_GESTURE) {
-    // ── Gesture Control Mode (Direct WS inputs control drive) ──
-    // Buzzer control
+    // ── Gesture Control Mode ─────────────────────────────────
     digitalWrite(BUZZER, rcHornOn ? HIGH : LOW);
-    // Update telemetry parameters asynchronously in the background
     static unsigned long lastSensorUpdate = 0;
     if (millis() - lastSensorUpdate > 150) {
       lastSensorUpdate = millis();
@@ -1844,84 +1863,62 @@ void loop() {
     }
     delay(15);
   } else if (carMode == MODE_FOLLOW) {
-    // ── Human Following Mode ──────────────────────────────────
+    // ── Human / Hand Following Mode ───────────────────────────
+    // No sweep needed. Put hand (10-32 cm) in front → instant lock-on.
+
+    long d = singlePingCM(20000UL);
+    lastDistance = d;
+    dC_dist = d;
+
     unsigned long now = millis();
-    if (now - lastFollowTime > 80) { // run logic at ~12Hz
-      lastFollowTime = now;
-      
-      if (!followFound) {
-        // Stop the car while searching
-        stopAll();
-        // Sweep search - use aimServo with wait=true so servo settles before reading
-        followAngle += followSweepDir;
-        if (followAngle >= 135) {
-          followAngle = 135;
-          followSweepDir = -6;
-        } else if (followAngle <= 45) {
-          followAngle = 45;
-          followSweepDir = 6;
-        }
-        aimServo(followAngle, true); // wait=true gives 150ms for servo to settle
-        
-        long d = singlePingCM(25000UL); // 25ms timeout ~425cm max range
-        lastDistance = d;
-        if (d >= 5 && d <= 70) {  // widened: catches targets at 5-70cm
-          followFound = true;
-          beep(50);
-          lostFollowTime = now;
-        }
+
+    if (d >= 10 && d <= 32) {
+      // Target in range — track it
+      followFound = true;
+      lostFollowTime = now;
+
+      // Micro-scan ±10° to detect which way target moved
+      aimServo(constrain(followAngle + 10, 45, 135), false);
+      delay(40);
+      long dL_s = singlePingCM(15000UL);
+
+      aimServo(constrain(followAngle - 10, 45, 135), false);
+      delay(40);
+      long dR_s = singlePingCM(15000UL);
+
+      aimServo(followAngle, false);
+
+      // Nudge servo toward closer valid reading
+      if (dL_s >= 10 && dL_s < dR_s && dL_s <= 40) {
+        followAngle = constrain(followAngle + 7, 45, 135);
+      } else if (dR_s >= 10 && dR_s < dL_s && dR_s <= 40) {
+        followAngle = constrain(followAngle - 7, 45, 135);
+      }
+
+      // Steer based on servo heading
+      if (followAngle > 108) {
+        pivotLeft(OA_TURN * 7 / 10);
+      } else if (followAngle < 72) {
+        pivotRight(OA_TURN * 7 / 10);
       } else {
-        // Target is found — read distance with servo already at followAngle
+        // Centred — maintain distance
+        if (d > 26)      forward(OA_SPEED);
+        else if (d < 12) reverse(OA_REVERSE);
+        else             stopAll();          // sweet spot 12-26 cm
+      }
+
+    } else {
+      // Out of range — stop and slowly re-centre
+      stopAll();
+      if (followFound && (now - lostFollowTime > 400)) {
+        followFound = false;
+        if      (followAngle > 93) followAngle -= 5;
+        else if (followAngle < 87) followAngle += 5;
+        else                       followAngle = TURN_ANGLE_C;
         aimServo(followAngle, false);
-        delay(80); // brief settle before read
-        long d = singlePingCM(25000UL);
-        lastDistance = d;
-        
-        if (d >= 5 && d <= 70) {
-          lostFollowTime = now;
-          dC_dist = d;
-          
-          // Micro-scan ±8° to find direction target moved
-          aimServo(constrain(followAngle + 8, 45, 135), false);
-          delay(60);
-          long dL_f = singlePingCM(20000UL);
-          
-          aimServo(constrain(followAngle - 8, 45, 135), false);
-          delay(60);
-          long dR_f = singlePingCM(20000UL);
-          
-          aimServo(followAngle, false);
-          
-          // Adjust servo angle to keep target centered
-          if (dL_f < d && dL_f < dR_f && dL_f >= 5) {
-            followAngle = constrain(followAngle + 5, 45, 135);
-          } else if (dR_f < d && dR_f < dL_f && dR_f >= 5) {
-            followAngle = constrain(followAngle - 5, 45, 135);
-          }
-          
-          // Steer motors based on servo angle
-          if (followAngle > 105) {
-            pivotLeft(OA_TURN * 8 / 10);
-          } else if (followAngle < 75) {
-            pivotRight(OA_TURN * 8 / 10);
-          } else {
-            // Target centred — control distance
-            if (d > 35) {
-              forward(OA_SPEED);       // too far  → chase
-            } else if (d < 12) {
-              reverse(OA_REVERSE);     // too close → back off
-            } else {
-              stopAll();               // sweet spot 12-35 cm
-            }
-          }
-        } else {
-          stopAll();
-          if (now - lostFollowTime > 1500) {
-            followFound = false;
-            followAngle = TURN_ANGLE_C;
-          }
-        }
       }
     }
+
+    delay(50); // 20 Hz
   }
 }
