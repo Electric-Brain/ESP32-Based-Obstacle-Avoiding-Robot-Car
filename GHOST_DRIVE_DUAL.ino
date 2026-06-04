@@ -1908,15 +1908,21 @@ void loop() {
       }
 
     } else {
-      // Out of range — stop and slowly re-centre
+      // Out of range — slow pendulum sweep so the car looks alive & actively searches
       stopAll();
       if (followFound && (now - lostFollowTime > 400)) {
         followFound = false;
-        if      (followAngle > 93) followAngle -= 5;
-        else if (followAngle < 87) followAngle += 5;
-        else                       followAngle = TURN_ANGLE_C;
-        aimServo(followAngle, false);
       }
+      // Step servo each loop at 3°/50ms = ~60°/sec, full arc ~1.3 s
+      followAngle += followSweepDir;
+      if (followAngle >= 130) {
+        followAngle = 130;
+        followSweepDir = -3;
+      } else if (followAngle <= 50) {
+        followAngle = 50;
+        followSweepDir = 3;
+      }
+      aimServo(followAngle, false);
     }
 
     delay(50); // 20 Hz
