@@ -1,27 +1,40 @@
-# ESP32 Based Obstacle-Avoiding & RC Web Robot Car
+# ESP32 Multi-Mode Robot Car – GHOST DRIVE
 
-This repository contains firmware for a feature-rich ESP32-based robot car. It supports two different control variations:
-1. **Fully Autonomous Obstacle Avoidance** ([ObstacleAvoidingCar.ino](file:///C:/Users/Gautam/.gemini/antigravity/scratch/ESP32-Based-Obstacle-Avoiding-Robot-Car/ObstacleAvoidingCar.ino))
-2. **Dual-Mode Autopilot + RC Web Car with Premium Glassmorphism Dashboard** ([GHOST_DRIVE_DUAL.ino](file:///C:/Users/Gautam/.gemini/antigravity/scratch/ESP32-Based-Obstacle-Avoiding-Robot-Car/GHOST_DRIVE_DUAL.ino))
+An ESP32-based robot car project built around the theme of progressive expansion. What started as a simple obstacle-avoiding car has been transformed into a **7-mode intelligent robot car** using WebSocket-based communication and a premium web dashboard.
 
-Both projects utilize dual TB6612FNG motor drivers (driving 4 motors independently), a servo-mounted ultrasonic scanner, an IR edge/cliff detector, a buzzer, and high-frequency quiet PWM (18 kHz) for smooth motor control.
+This repository contains two firmware files:
+1. **Standalone Obstacle Avoidance** — [ObstacleAvoidingCar.ino](ObstacleAvoidingCar.ino)
+2. **Multi-Mode GHOST DRIVE** — [GHOST_DRIVE_DUAL.ino](GHOST_DRIVE_DUAL.ino) *(main firmware)*
+
+---
+
+## 🎮 7 Planned Car Modes
+
+| # | Mode | Status | Description |
+|---|------|--------|-------------|
+| 1 | **Obstacle Avoiding** | ✅ Done | Autonomous self-driving with servo scan |
+| 2 | **RC Web Control** | ✅ Done | 360° joystick browser control |
+| 3 | **Gesture Control** | ✅ Done | Phone IMU tilt steering via WebSocket |
+| 4 | **Human Following** | ✅ Done | Servo-lock tracking + follow logic |
+| 5 | **Line Following** | 🔜 Planned | IR-based track following |
+| 6 | **Light Controlled** | 🔜 Planned | LDR sensor-based steering |
+| 7 | **Sound Controlled** | 🔜 Planned | Microphone-triggered commands |
 
 ---
 
 ## 📂 Firmware Variations
 
 ### 1. ObstacleAvoidingCar.ino (Autonomous Only)
-A lightweight firmware focusing solely on self-driving collision avoidance. It uses a servo sweep pattern to look left, right, and center when blocked, selecting the most open path.
+A lightweight, standalone firmware focusing solely on self-driving collision avoidance. Uses a servo sweep pattern to look left, right, and center when blocked, then selects the best path.
 
-### 2. GHOST_DRIVE_DUAL.ino (Dual Mode: Autopilot + RC Web Control)
-An advanced, feature-rich firmware featuring a real-time web control panel hosted directly on the ESP32.
-*   **Autopilot (Mode A)**: Self-driving with speed adjustment and collision avoidance.
-*   **RC Drive (Mode B)**: Controlled via a premium 360-degree vector joystick in your browser.
-*   **Glassmorphism Dashboard**: Fully responsive web interface with a futuristic design.
-*   **Active Telemetry Radar**: Live canvas-based sweeping radar visualizes obstacle directions with decaying red warning dots.
-*   **Live Sensor Statuses**: Range and cliff/edge sensing telemetry update in real-time.
-*   **Interactive Controls**: Adjustable drive velocity slider, servo position control slider, and a triggerable horn.
-*   **WiFi Integration**: Supports Access Point (AP) mode (creates its own "GhostDrive" network) or client mode (connects to your router).
+### 2. GHOST_DRIVE_DUAL.ino — The Main Firmware
+Full multi-mode firmware with a Glassmorphism Web Dashboard hosted directly on the ESP32, communicating via WebSocket (port 81) for real-time low-latency control.
+
+#### Implemented Modes:
+- **AUTOPILOT** — Autonomous obstacle avoidance with IR cliff detection.
+- **RC DRIVE** — Web-based 360° vector joystick. Speed and servo sliders included.
+- **TILT (Gesture)** — Tilt your phone to steer! Uses the browser `DeviceOrientation` API. Speed scales linearly with tilt angle (10°–40° deadzone to full speed). Diagonal tilts produce diagonal movement.
+- **FOLLOW** — Servo-mounted ultrasonic sensor sweeps 45°–135°, locks onto a target at 15–50 cm, and steers/drives the car to maintain 20–30 cm of tracking distance.
 
 ---
 

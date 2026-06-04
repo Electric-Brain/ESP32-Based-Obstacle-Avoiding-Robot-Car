@@ -14,13 +14,15 @@
 #include <ESP32Servo.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WebSocketsServer.h>
 // ─── WiFi Configuration ──────────────────────────────────────
 #define WIFI_AP_MODE true  // true = creates own hotspot, false = connects to router
 const char* WIFI_SSID = "GhostDrive";
 const char* WIFI_PASS = "12345678";
 WebServer server(80);
+WebSocketsServer webSocket = WebSocketsServer(81);
 // ─── Mode ────────────────────────────────────────────────────
-enum CarMode { MODE_OA, MODE_RC };
+enum CarMode { MODE_OA, MODE_RC, MODE_GESTURE, MODE_FOLLOW };
 CarMode carMode = MODE_OA;   // default: OA on boot
 // ─── Pin Mapping ─────────────────────────────────────────────
 // Left TB6612 (two motors on left side)
@@ -79,6 +81,12 @@ volatile long dC_dist = 999;
 volatile long dR_dist = 999;
 // ─── Actuator Globals ─────────────────────────────────────────
 Servo scanServo;
+// ─── Human Follower state ────────────────────────────────────
+int followAngle = 90;
+bool followFound = false;
+int followSweepDir = 8;
+unsigned long lastFollowTime = 0;
+unsigned long lostFollowTime = 0;
 // ─────────────────────────────────────────────────────────────
 //  MOTOR DRIVER HELPERS (Compatible with Core v2.x and v3.x)
 // ─────────────────────────────────────────────────────────────
@@ -167,6 +175,65 @@ void applyRcCmd(const char* cmd, int spd) {
   else if (strcmp(cmd, "BR") == 0) { driveLeft(-spd);driveRight(-t); }
   else                             { stopAll(); }
 }
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[%u] Disconnected!\n", num);
+      break;
+    case WStype_CONNECTED: {
+      IPAddress ip = webSocket.remoteIP(num);
+      Serial.printf("[%u] Connected from %s\n", num, ip.toString().c_str());
+      break;
+    }
+    case WStype_TEXT: {
+      String msg = String((char*)payload);
+      if (msg.startsWith("g:")) {
+        int colon1 = msg.indexOf(':', 2);
+        if (colon1 != -1) {
+          String cmd = msg.substring(2, colon1);
+          int speed = msg.substring(colon1 + 1).toInt();
+          if (carMode == MODE_GESTURE) {
+            applyRcCmd(cmd.c_str(), speed);
+          }
+        }
+      } else if (msg.startsWith("cmd:")) {
+        String cmd = msg.substring(4);
+        if (carMode == MODE_RC) {
+          strlcpy(rcCmd, cmd.c_str(), sizeof(rcCmd));
+        }
+      } else if (msg.startsWith("speed:")) {
+        int pct = msg.substring(6).toInt();
+        pct = constrain(pct, 10, 100);
+        rcSpeed = (int)(RC_SPEED_DEF * pct / 100);
+      } else if (msg.startsWith("servo:")) {
+        rcServoAngle = constrain(msg.substring(6).toInt(), 0, 180);
+      } else if (msg.startsWith("horn:")) {
+        rcHornOn = (msg.substring(5) == "1");
+      } else if (msg.startsWith("mode:")) {
+        String m = msg.substring(5);
+        stopAll();
+        strlcpy(rcCmd, "S", sizeof(rcCmd));
+        if (m == "rc") {
+          carMode = MODE_RC;
+          beep(80);
+        } else if (m == "gesture") {
+          carMode = MODE_GESTURE;
+          beep(80);
+        } else if (m == "follow") {
+          carMode = MODE_FOLLOW;
+          beep(80);
+        } else {
+          carMode = MODE_OA;
+          beep(80); delay(80); beep(80);
+          rcServoAngle = TURN_ANGLE_C;
+        }
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
 void handleRoot() {
   String page = R"rawhtml(
 <!DOCTYPE html>
@@ -185,6 +252,10 @@ void handleRoot() {
       --accent-primary-glow: rgba(99, 102, 241, 0.25);
       --accent-success: #10b981; /* Emerald for Autopilot */
       --accent-success-glow: rgba(16, 185, 129, 0.25);
+      --accent-gesture: #06b6d4; /* Cyan for Gesture Control */
+      --accent-gesture-glow: rgba(6, 182, 212, 0.25);
+      --accent-follow: #a855f7; /* Purple for Human Following */
+      --accent-follow-glow: rgba(168, 85, 247, 0.25);
       --accent-danger: #f43f5e; /* Rose for Alerts/Horn */
       --accent-danger-glow: rgba(244, 63, 94, 0.3);
       --text-main: #f9fafb;
@@ -208,8 +279,8 @@ void handleRoot() {
       background-color: var(--bg-color);
       color: var(--text-main);
       background-image: 
-        radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.12) 0%, transparent 40%),
-        radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.08) 0%, transparent 40%);
+      	radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.12) 0%, transparent 40%),
+      	radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.08) 0%, transparent 40%);
       background-attachment: fixed;
       min-height: 100vh;
       display: flex;
@@ -233,6 +304,14 @@ void handleRoot() {
     .app-container.theme-rc {
       --accent-active: var(--accent-primary);
       --accent-active-glow: var(--accent-primary-glow);
+    }
+    .app-container.theme-gesture {
+      --accent-active: var(--accent-gesture);
+      --accent-active-glow: var(--accent-gesture-glow);
+    }
+    .app-container.theme-follow {
+      --accent-active: var(--accent-follow);
+      --accent-active-glow: var(--accent-follow-glow);
     }
     /* Header styling */
     .header {
@@ -335,16 +414,16 @@ void handleRoot() {
       background: none;
       border: none;
       color: var(--text-muted);
-      padding: 12px;
+      padding: 12px 6px;
       font-family: inherit;
-      font-size: 11px;
+      font-size: 9px;
       font-weight: 700;
       letter-spacing: 0.08em;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
+      gap: 4px;
       z-index: 2;
       transition: color 0.3s ease;
     }
@@ -354,8 +433,8 @@ void handleRoot() {
     }
     
     .tab-icon {
-      width: 15px;
-      height: 15px;
+      width: 13px;
+      height: 13px;
       fill: none;
       stroke: currentColor;
       stroke-width: 2.2;
@@ -365,7 +444,7 @@ void handleRoot() {
       position: absolute;
       left: 4px;
       top: 4px;
-      width: calc(50% - 4px);
+      width: calc(25% - 4px);
       height: calc(100% - 8px);
       background: linear-gradient(135deg, var(--accent-success) 0%, rgba(16, 185, 129, 0.8) 100%);
       border-radius: 14px;
@@ -378,6 +457,16 @@ void handleRoot() {
       transform: translateX(100%);
       background: linear-gradient(135deg, var(--accent-primary) 0%, rgba(99, 102, 241, 0.8) 100%);
       box-shadow: 0 4px 12px var(--accent-primary-glow);
+    }
+    .mode-selector.gesture-active .tab-glider {
+      transform: translateX(200%);
+      background: linear-gradient(135deg, var(--accent-gesture) 0%, rgba(6, 182, 212, 0.8) 100%);
+      box-shadow: 0 4px 12px var(--accent-gesture-glow);
+    }
+    .mode-selector.follow-active .tab-glider {
+      transform: translateX(300%);
+      background: linear-gradient(135deg, var(--accent-follow) 0%, rgba(168, 85, 247, 0.8) 100%);
+      box-shadow: 0 4px 12px var(--accent-follow-glow);
     }
     /* Telemetry Panel */
     .metrics-container {
@@ -455,11 +544,11 @@ void handleRoot() {
       to { opacity: 1; }
     }
     /* Tab Pages */
-    .panel-oa, .panel-rc {
+    .panel-oa, .panel-rc, .panel-gesture, .panel-follow {
       display: none;
     }
     
-    .panel-oa.active, .panel-rc.active {
+    .panel-oa.active, .panel-rc.active, .panel-gesture.active, .panel-follow.active {
       display: block;
       animation: tab-switch-in 0.3s cubic-bezier(0.25, 1, 0.5, 1) forwards;
     }
@@ -707,11 +796,19 @@ void handleRoot() {
   <div class='mode-selector'>
     <button class='mode-tab active' id='tab-oa' onclick='changeMode("oa")'>
       <svg class='tab-icon' viewBox='0 0 24 24'><circle cx='12' cy='12' r='3'/><path d='M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12'/></svg>
-      <span>AUTOPILOT</span>
+      <span>AUTO</span>
     </button>
     <button class='mode-tab' id='tab-rc' onclick='changeMode("rc")'>
       <svg class='tab-icon' viewBox='0 0 24 24'><rect x='2' y='7' width='20' height='14' rx='3'/><path d='M12 7V3M8 3h8'/><line x1='9' y1='14' x2='9' y2='14'/><line x1='6' y1='14' x2='12' y2='14'/><line x1='9' y1='11' x2='9' y2='17'/><circle cx='15' cy='14' r='1'/></svg>
-      <span>RC DRIVE</span>
+      <span>RC</span>
+    </button>
+    <button class='mode-tab' id='tab-gesture' onclick='changeMode("gesture")'>
+      <svg class='tab-icon' viewBox='0 0 24 24'><rect x='5' y='2' width='14' height='20' rx='2' ry='2'/><line x1='12' y1='18' x2='12.01' y2='18'/><path d='M17 6c2 1 3 3 3 5s-1 4-3 5'/><path d='M7 6c-2 1-3 3-3 5s1 4 3 5'/></svg>
+      <span>TILT</span>
+    </button>
+    <button class='mode-tab' id='tab-follow' onclick='changeMode("follow")'>
+      <svg class='tab-icon' viewBox='0 0 24 24'><path d='M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2'/><circle cx='9' cy='7' r='4'/><path d='M22 9l-3 3 3 3'/></svg>
+      <span>FOLLOW</span>
     </button>
     <div class='tab-glider'></div>
   </div>
@@ -774,12 +871,56 @@ void handleRoot() {
       </div>
     </div>
   </section>
+
+  <!-- Gesture Tab Page -->
+  <section class='card panel-gesture' id='panel-gesture'>
+    <h2 class='card-title'>IMU GESTURE CONTROLLER</h2>
+    <div class="joystick-container">
+      <div class="imu-visualizer" style="display: flex; justify-content: center; margin: 10px 0; width: 100%;">
+        <canvas id="imu-canvas" width="140" height="140" style="background: transparent; border-radius: 50%; display: block;"></canvas>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; width: 100%; text-align: center; margin-bottom: 16px;">
+        <div class="metric-widget" style="padding: 10px;">
+          <span class="metric-label">PITCH TILT</span>
+          <span class="metric-value" id="val-pitch">0°</span>
+        </div>
+        <div class="metric-widget" style="padding: 10px;">
+          <span class="metric-label">ROLL TILT</span>
+          <span class="metric-value" id="val-roll">0°</span>
+        </div>
+      </div>
+      <button class="btn-horn" id="btn-imu-toggle" onclick="requestOrientationPermission()" style="background: rgba(6, 182, 212, 0.08); border-color: rgba(6, 182, 212, 0.2); color: var(--accent-gesture);">
+        START TILT STEERING
+      </button>
+    </div>
+  </section>
+
+  <!-- Follow Tab Page -->
+  <section class='card panel-follow' id='panel-follow'>
+    <h2 class='card-title'>HUMAN TARGET FOLLOWER</h2>
+    <div class="oa-status-msg" style="margin-bottom: 16px;">
+      The car will dynamically seek out a human at a close distance range (15cm to 50cm).
+      The scanning deck tracks the target, steering and driving the car to maintain its distance.
+    </div>
+    <div class="metrics-container" style="grid-template-columns: 1fr;">
+      <div class="metric-widget" style="align-items: center; padding: 20px;">
+        <span class="metric-label">TRACKED TARGET DISTANCE</span>
+        <span class="metric-value" id="val-follow-dist" style="font-size: 24px; color: var(--accent-follow);">STANDBY</span>
+        <div class="gauge-bar-container" style="width: 80%; margin-top: 10px;">
+          <div class="gauge-bar" id="follow-gauge" style="width: 0%; background: var(--accent-follow);"></div>
+        </div>
+      </div>
+    </div>
+  </section>
   
 </div>
 <script>
   let activeCmd = 'S';
+  let socket;
+  let imuActive = false;
+  let lastGestureTime = 0;
   
-  // Custom throttle to prevent ESP32 TCP network starvation
+  // Custom throttle to prevent ESP32 network starvation
   const throttle = (func, limit) => {
     let inThrottle;
     return (...args) => {
@@ -791,17 +932,59 @@ void handleRoot() {
       }
     }
   };
-  // API wrappers
+  
+  // WebSockets setup
+  const initWebSocket = () => {
+    const wsUrl = 'ws://' + window.location.hostname + ':81/';
+    socket = new WebSocket(wsUrl);
+    socket.onopen = () => {
+      const badge = document.getElementById('conn-badge');
+      badge.textContent = 'CONNECTED';
+      badge.style.background = 'rgba(16, 185, 129, 0.08)';
+      badge.style.color = 'var(--accent-success)';
+      badge.style.borderColor = 'rgba(16, 185, 129, 0.2)';
+    };
+    socket.onclose = () => {
+      const badge = document.getElementById('conn-badge');
+      badge.textContent = 'OFFLINE';
+      badge.style.background = 'rgba(244, 63, 94, 0.08)';
+      badge.style.color = 'var(--accent-danger)';
+      badge.style.borderColor = 'rgba(244, 63, 94, 0.2)';
+      setTimeout(initWebSocket, 2000);
+    };
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        updateTelemetryUI(data);
+      } catch(e) {}
+    };
+  };
+  
+  // Primary WS communication with HTTP fallbacks
   const sendSpeed = throttle((val) => {
-    fetch('/speed?v=' + val).catch(() => {});
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('speed:' + val);
+    } else {
+      fetch('/speed?v=' + val).catch(() => {});
+    }
   }, 100);
+  
   const sendServo = throttle((val) => {
-    fetch('/servo?a=' + val).catch(() => {});
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('servo:' + val);
+    } else {
+      fetch('/servo?a=' + val).catch(() => {});
+    }
   }, 80);
+  
   const sendCmd = (cmd) => {
     if (cmd !== activeCmd) {
       activeCmd = cmd;
-      fetch('/cmd?d=' + cmd).catch(() => {});
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send('cmd:' + cmd);
+      } else {
+        fetch('/cmd?d=' + cmd).catch(() => {});
+      }
       const names = { F: 'FORWARD', B: 'REVERSE', L: 'LEFT', R: 'RIGHT', FL: 'FWD-LEFT', FR: 'FWD-RIGHT', BL: 'REV-LEFT', BR: 'REV-RIGHT', S: 'STOP' };
       document.getElementById('val-cmd').textContent = names[cmd] || 'STOP';
       
@@ -815,14 +998,21 @@ void handleRoot() {
       }
     }
   };
+  
+  const sendGestureCmd = (cmd, speed) => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('g:' + cmd + ':' + speed);
+    }
+  };
+  
   // Virtual Joystick Logic
   const handle = document.getElementById('joy-handle');
   const joyBase = handle.parentElement;
   let isDragging = false;
   let startX = 0, startY = 0;
   const maxDistance = 45; // max displacement boundary (px)
+  
   const initJoystick = () => {
-    // Pointerdown down handler
     joyBase.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       isDragging = true;
@@ -834,23 +1024,26 @@ void handleRoot() {
       
       updateJoyPos(e.clientX, e.clientY);
     });
+    
     joyBase.addEventListener('pointermove', (e) => {
       if (!isDragging) return;
       e.preventDefault();
       updateJoyPos(e.clientX, e.clientY);
     });
+    
     const endDrag = (e) => {
       if (!isDragging) return;
       isDragging = false;
       joyBase.releasePointerCapture(e.pointerId);
       
-      // return knob to center
       handle.style.transform = 'translate(0px, 0px)';
       sendCmd('S');
     };
+    
     joyBase.addEventListener('pointerup', endDrag);
     joyBase.addEventListener('pointercancel', endDrag);
   };
+  
   const updateJoyPos = (clientX, clientY) => {
     let dx = clientX - startX;
     let dy = clientY - startY;
@@ -863,9 +1056,8 @@ void handleRoot() {
     
     handle.style.transform = `translate(${dx}px, ${dy}px)`;
     
-    // Normalize coordinates
     const nx = dx / maxDistance;
-    const ny = -dy / maxDistance; // invert Y axis for coordinates
+    const ny = -dy / maxDistance;
     
     let cmd = 'S';
     const deadzone = 0.35;
@@ -873,7 +1065,7 @@ void handleRoot() {
     if (Math.abs(nx) < deadzone && Math.abs(ny) < deadzone) {
       cmd = 'S';
     } else {
-      const angle = Math.atan2(ny, nx) * 180 / Math.PI; // angle range -180 to 180
+      const angle = Math.atan2(ny, nx) * 180 / Math.PI;
       
       if (angle >= -22.5 && angle < 22.5) {
         cmd = 'R';
@@ -896,21 +1088,33 @@ void handleRoot() {
     sendCmd(cmd);
   };
   initJoystick();
+  
   // Horn Button Touch/Pointer listeners
   const horn = document.getElementById('btn-horn');
   const hornStart = (e) => {
     e.preventDefault();
     horn.classList.add('active');
-    fetch('/horn?on=1').catch(() => {});
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('horn:1');
+    } else {
+      fetch('/horn?on=1').catch(() => {});
+    }
   };
+  
   const hornEnd = (e) => {
     e.preventDefault();
     horn.classList.remove('active');
-    fetch('/horn?on=0').catch(() => {});
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('horn:0');
+    } else {
+      fetch('/horn?on=0').catch(() => {});
+    }
   };
+  
   horn.addEventListener('pointerdown', hornStart);
   horn.addEventListener('pointerup', hornEnd);
   horn.addEventListener('pointerleave', hornEnd);
+  
   // Sliders Input Bindings
   const speedSlider = document.getElementById('slide-speed');
   const speedVal = document.getElementById('val-speed');
@@ -919,9 +1123,15 @@ void handleRoot() {
     speedVal.textContent = txt;
     sendSpeed(speedSlider.value);
   });
+  
   speedSlider.addEventListener('change', () => {
-    fetch('/speed?v=' + speedSlider.value).catch(() => {});
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('speed:' + speedSlider.value);
+    } else {
+      fetch('/speed?v=' + speedSlider.value).catch(() => {});
+    }
   });
+  
   const servoSlider = document.getElementById('slide-servo');
   const servoVal = document.getElementById('val-servo');
   servoSlider.addEventListener('input', () => {
@@ -929,112 +1139,154 @@ void handleRoot() {
     servoVal.textContent = txt;
     sendServo(servoSlider.value);
   });
-  servoSlider.addEventListener('change', () => {
-    fetch('/servo?a=' + servoSlider.value).catch(() => {});
-  });
+  
+  const servoSliderChange = () => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('servo:' + servoSlider.value);
+    } else {
+      fetch('/servo?a=' + servoSlider.value).catch(() => {});
+    }
+  };
+  servoSlider.addEventListener('change', servoSliderChange);
+  
   // Mode Selection Tabs Switcher
   const changeMode = (mode) => {
+    if (mode !== 'gesture' && imuActive) {
+      stopOrientationListener();
+    }
     syncModeTab(mode);
-    fetch('/set?mode=' + mode).catch(() => {});
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('mode:' + mode);
+    } else {
+      fetch('/set?mode=' + mode).catch(() => {});
+    }
   };
+  
   const syncModeTab = (mode) => {
     const container = document.querySelector('.app-container');
     const selector = document.querySelector('.mode-selector');
-    const tabOa = document.getElementById('tab-oa');
-    const tabRc = document.getElementById('tab-rc');
-    const panelOa = document.getElementById('panel-oa');
-    const panelRc = document.getElementById('panel-rc');
+    const tabs = ['oa', 'rc', 'gesture', 'follow'];
     
-    if (mode === 'oa') {
-      tabOa.classList.add('active');
-      tabRc.classList.remove('active');
-      selector.classList.remove('rc-active');
-      panelOa.classList.add('active');
-      panelRc.classList.remove('active');
-      container.className = 'app-container theme-oa';
-    } else {
-      tabOa.classList.remove('active');
-      tabRc.classList.add('active');
+    tabs.forEach(t => {
+      document.getElementById('tab-' + t).classList.remove('active');
+      document.getElementById('panel-' + t).classList.remove('active');
+    });
+    
+    document.getElementById('tab-' + mode).classList.add('active');
+    document.getElementById('panel-' + mode).classList.add('active');
+    
+    selector.className = 'mode-selector';
+    if (mode === 'rc') {
       selector.classList.add('rc-active');
-      panelOa.classList.remove('active');
-      panelRc.classList.add('active');
       container.className = 'app-container theme-rc';
+    } else if (mode === 'gesture') {
+      selector.classList.add('gesture-active');
+      container.className = 'app-container theme-gesture';
+      drawImuIndicator(0, 0);
+    } else if (mode === 'follow') {
+      selector.classList.add('follow-active');
+      container.className = 'app-container theme-follow';
+    } else {
+      container.className = 'app-container theme-oa';
     }
   };
+  
   // Telemetry updates
+  const updateTelemetryUI = (data) => {
+    // Distance Lidar
+    const distVal = document.getElementById('val-dist');
+    const distBar = document.getElementById('dist-gauge');
+    if (data.dist >= 999) {
+      distVal.textContent = 'CLEAR';
+      distVal.className = 'metric-value status-safe';
+      distBar.style.width = '100%';
+      distBar.style.background = 'var(--accent-success)';
+    } else {
+      distVal.textContent = data.dist + ' cm';
+      const pct = Math.min(Math.max(data.dist, 0), 100);
+      distBar.style.width = pct + '%';
+      if (data.dist > 50) {
+        distVal.className = 'metric-value status-safe';
+        distBar.style.background = 'var(--accent-success)';
+      } else if (data.dist > 30) {
+        distVal.className = 'metric-value status-warning';
+        distBar.style.background = '#f59e0b';
+      } else {
+        distVal.className = 'metric-value status-danger';
+        distBar.style.background = 'var(--accent-danger)';
+      }
+    }
+    
+    // Cliff IR
+    const cliffVal = document.getElementById('val-cliff');
+    const cliffBar = document.getElementById('cliff-gauge');
+    if (data.ir < 1600) {
+      cliffVal.textContent = 'CLIFF!';
+      cliffVal.className = 'metric-value status-danger';
+      cliffBar.style.width = '20%';
+      cliffBar.style.background = 'var(--accent-danger)';
+    } else {
+      cliffVal.textContent = 'SAFE';
+      cliffVal.className = 'metric-value status-safe';
+      cliffBar.style.width = '100%';
+      cliffBar.style.background = 'var(--accent-success)';
+    }
+    
+    // Follow Mode telemetries
+    const followVal = document.getElementById('val-follow-dist');
+    const followBar = document.getElementById('follow-gauge');
+    if (data.mode === 'follow') {
+      if (data.dist >= 999) {
+        followVal.textContent = 'SEEKING...';
+        followVal.style.color = 'var(--text-muted)';
+        followBar.style.width = '0%';
+      } else {
+        followVal.textContent = data.dist + ' cm';
+        followVal.style.color = 'var(--accent-active)';
+        const fPct = Math.min(Math.max((data.dist - 15) / (50 - 15) * 100, 0), 100);
+        followBar.style.width = fPct + '%';
+      }
+    }
+    
+    // Update radar sweeps target trackers
+    currentAngle = data.angle;
+    
+    // Push target readings to decay array
+    addRadarTarget(data.angle, data.dist);
+    addRadarTarget(150, data.dL);
+    addRadarTarget(90, data.dC);
+    addRadarTarget(30, data.dR);
+    
+    // Sync mode tab selection
+    const tabs = ['oa', 'rc', 'gesture', 'follow'];
+    const activeTab = tabs.find(t => document.getElementById('tab-' + t).classList.contains('active'));
+    if (data.mode !== activeTab) {
+      syncModeTab(data.mode);
+    }
+  };
+  
   const fetchTelemetry = () => {
     fetch('/status')
       .then(res => res.json())
       .then(data => {
-        // Connected Badge
         const badge = document.getElementById('conn-badge');
         badge.textContent = 'CONNECTED';
         badge.style.background = 'rgba(16, 185, 129, 0.08)';
         badge.style.color = 'var(--accent-success)';
         badge.style.borderColor = 'rgba(16, 185, 129, 0.2)';
-        
-        // Distance Lidar
-        const distVal = document.getElementById('val-dist');
-        const distBar = document.getElementById('dist-gauge');
-        if (data.dist >= 999) {
-          distVal.textContent = 'CLEAR';
-          distVal.className = 'metric-value status-safe';
-          distBar.style.width = '100%';
-          distBar.style.background = 'var(--accent-success)';
-        } else {
-          distVal.textContent = data.dist + ' cm';
-          const pct = Math.min(Math.max(data.dist, 0), 100);
-          distBar.style.width = pct + '%';
-          if (data.dist > 50) {
-            distVal.className = 'metric-value status-safe';
-            distBar.style.background = 'var(--accent-success)';
-          } else if (data.dist > 30) {
-            distVal.className = 'metric-value status-warning';
-            distBar.style.background = '#f59e0b';
-          } else {
-            distVal.className = 'metric-value status-danger';
-            distBar.style.background = 'var(--accent-danger)';
-          }
-        }
-        
-        // Cliff IR
-        const cliffVal = document.getElementById('val-cliff');
-        const cliffBar = document.getElementById('cliff-gauge');
-        if (data.ir < 1600) {
-          cliffVal.textContent = 'CLIFF!';
-          cliffVal.className = 'metric-value status-danger';
-          cliffBar.style.width = '20%';
-          cliffBar.style.background = 'var(--accent-danger)';
-        } else {
-          cliffVal.textContent = 'SAFE';
-          cliffVal.className = 'metric-value status-safe';
-          cliffBar.style.width = '100%';
-          cliffBar.style.background = 'var(--accent-success)';
-        }
-        
-        // Update radar sweeps target trackers
-        currentAngle = data.angle;
-        
-        // Push target readings to decay array
-        addRadarTarget(data.angle, data.dist);
-        addRadarTarget(150, data.dL);
-        addRadarTarget(90, data.dC);
-        addRadarTarget(30, data.dR);
-        // Sync mode tab selection
-        if (data.mode === 'oa' && !tabOa.classList.contains('active')) {
-          syncModeTab('oa');
-        } else if (data.mode === 'rc' && !tabRc.classList.contains('active')) {
-          syncModeTab('rc');
-        }
+        updateTelemetryUI(data);
       })
       .catch(() => {
-        const badge = document.getElementById('conn-badge');
-        badge.textContent = 'OFFLINE';
-        badge.style.background = 'rgba(244, 63, 94, 0.08)';
-        badge.style.color = 'var(--accent-danger)';
-        badge.style.borderColor = 'rgba(244, 63, 94, 0.2)';
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          const badge = document.getElementById('conn-badge');
+          badge.textContent = 'OFFLINE';
+          badge.style.background = 'rgba(244, 63, 94, 0.08)';
+          badge.style.color = 'var(--accent-danger)';
+          badge.style.borderColor = 'rgba(244, 63, 94, 0.2)';
+        }
       });
   };
+  
   // Canvas radar renderer logic
   const canvas = document.getElementById('radar-canvas');
   const ctx = canvas.getContext('2d');
@@ -1044,18 +1296,19 @@ void handleRoot() {
   
   let currentAngle = 90;
   let targetSpots = []; // holds target markers {angle, dist, life}
+  
   const addRadarTarget = (angle, dist) => {
     if (dist <= 0 || dist >= 100) return;
     const radAngle = angle;
-    // check if point already plotted at this angle range (e.g. within 15deg)
     const existing = targetSpots.find(t => Math.abs(t.angle - radAngle) < 15);
     if (existing) {
       existing.dist = dist;
-      existing.life = 1.0; // refresh decay path
+      existing.life = 1.0;
     } else {
       targetSpots.push({ angle: radAngle, dist: dist, life: 1.0 });
     }
   };
+  
   const renderRadar = () => {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
@@ -1074,6 +1327,7 @@ void handleRoot() {
       ctx.arc(cx, cy, (rVal / 100) * maxR, 0, 2 * Math.PI);
       ctx.stroke();
     });
+    
     // Crosshairs lines
     ctx.setLineDash([]);
     ctx.strokeStyle = 'rgba(16, 185, 129, 0.06)';
@@ -1083,6 +1337,7 @@ void handleRoot() {
     ctx.moveTo(cx, cy - maxR);
     ctx.lineTo(cx, cy + maxR);
     ctx.stroke();
+    
     // Field of view lines (Left and Right bounds: 30deg and 150deg)
     ctx.strokeStyle = 'rgba(16, 185, 129, 0.04)';
     [30, 150].forEach(deg => {
@@ -1092,9 +1347,14 @@ void handleRoot() {
       ctx.lineTo(cx + maxR * Math.cos(rad), cy - maxR * Math.sin(rad));
       ctx.stroke();
     });
+    
     // Dynamic active theme color determination
-    const isRC = document.querySelector('.app-container').classList.contains('theme-rc');
-    const rgbColor = isRC ? '99, 102, 241' : '16, 185, 129';
+    const container = document.querySelector('.app-container');
+    let rgbColor = '16, 185, 129';
+    if (container.classList.contains('theme-rc')) rgbColor = '99, 102, 241';
+    else if (container.classList.contains('theme-gesture')) rgbColor = '6, 182, 212';
+    else if (container.classList.contains('theme-follow')) rgbColor = '168, 85, 247';
+    
     // Sensor flashlight sweeping cone (16deg width)
     const beamAngle = currentAngle * Math.PI / 180;
     const beamGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR);
@@ -1108,6 +1368,7 @@ void handleRoot() {
     ctx.arc(cx, cy, maxR, -beamAngle - (8 * Math.PI/180), -beamAngle + (8 * Math.PI/180));
     ctx.closePath();
     ctx.fill();
+    
     // Sweeping beam centerline indicator
     ctx.strokeStyle = `rgba(${rgbColor}, 0.4)`;
     ctx.lineWidth = 1.5;
@@ -1115,14 +1376,16 @@ void handleRoot() {
     ctx.moveTo(cx, cy);
     ctx.lineTo(cx + maxR * Math.cos(beamAngle), cy - maxR * Math.sin(beamAngle));
     ctx.stroke();
+    
     // Decay update & draw warning markers
-    targetSpots.forEach(t => t.life -= 0.012); // slow fade out
+    targetSpots.forEach(t => t.life -= 0.012);
     targetSpots = targetSpots.filter(t => t.life > 0);
     targetSpots.forEach(t => {
       const r = (t.dist / 100) * maxR;
       const rAngle = t.angle * Math.PI / 180;
       const tx = cx + r * Math.cos(rAngle);
       const ty = cy - r * Math.sin(rAngle);
+      
       // Warning obstacle glow ring
       ctx.beginPath();
       ctx.arc(tx, ty, 4, 0, 2 * Math.PI);
@@ -1130,7 +1393,8 @@ void handleRoot() {
       ctx.shadowColor = '#f43f5e';
       ctx.shadowBlur = 8;
       ctx.fill();
-      ctx.shadowBlur = 0; // reset shadow parameter
+      ctx.shadowBlur = 0;
+      
       // Pulsing outer halo rings
       ctx.beginPath();
       ctx.arc(tx, ty, 12 * (1 - t.life), 0, 2 * Math.PI);
@@ -1140,10 +1404,141 @@ void handleRoot() {
     });
     requestAnimationFrame(renderRadar);
   };
-  // Initialize loop
-  requestAnimationFrame(renderRadar);
-  // Poll server state every 350ms
-  setInterval(fetchTelemetry, 350);
+  
+  // IMU canvas indicator bubble drawing
+  const drawImuIndicator = (pitch, roll) => {
+    const imuCanvas = document.getElementById('imu-canvas');
+    if (!imuCanvas) return;
+    const imuCtx = imuCanvas.getContext('2d');
+    const icx = imuCanvas.width / 2;
+    const icy = imuCanvas.height / 2;
+    const maxOffset = 50;
+    
+    imuCtx.clearRect(0, 0, imuCanvas.width, imuCanvas.height);
+    
+    // Draw outer circle
+    imuCtx.strokeStyle = 'rgba(6, 182, 212, 0.15)';
+    imuCtx.lineWidth = 2;
+    imuCtx.beginPath();
+    imuCtx.arc(icx, icy, maxOffset, 0, 2 * Math.PI);
+    imuCtx.stroke();
+    
+    // Draw crosshairs
+    imuCtx.strokeStyle = 'rgba(6, 182, 212, 0.05)';
+    imuCtx.beginPath();
+    imuCtx.moveTo(icx - maxOffset, icy);
+    imuCtx.lineTo(icx + maxOffset, icy);
+    imuCtx.moveTo(icx, icy - maxOffset);
+    imuCtx.lineTo(icx, icy + maxOffset);
+    imuCtx.stroke();
+    
+    // Calculate bubble position based on pitch/roll (clamp between -45 and 45)
+    const px = Math.min(Math.max(roll / 45, -1), 1) * maxOffset;
+    const py = Math.min(Math.max(-pitch / 45, -1), 1) * maxOffset;
+    
+    // Draw bubble
+    imuCtx.beginPath();
+    imuCtx.arc(icx + px, icy + py, 10, 0, 2 * Math.PI);
+    imuCtx.fillStyle = 'var(--accent-active)';
+    imuCtx.shadowColor = 'var(--accent-active)';
+    imuCtx.shadowBlur = 10;
+    imuCtx.fill();
+    imuCtx.shadowBlur = 0;
+  };
+  
+  // Process device orientation and send packets to server
+  const processOrientationData = (pitch, roll) => {
+    const now = Date.now();
+    if (now - lastGestureTime < 100) return;
+    lastGestureTime = now;
+    
+    let cmd = 'S';
+    const deadzone = 10;
+    
+    const absPitch = Math.abs(pitch);
+    const absRoll = Math.abs(roll);
+    
+    if (absPitch > deadzone || absRoll > deadzone) {
+      if (pitch > deadzone && roll > deadzone) cmd = 'FR';
+      else if (pitch > deadzone && roll < -deadzone) cmd = 'FL';
+      else if (pitch < -deadzone && roll > deadzone) cmd = 'BR';
+      else if (pitch < -deadzone && roll < -deadzone) cmd = 'BL';
+      else if (pitch > deadzone) cmd = 'F';
+      else if (pitch < -deadzone) cmd = 'B';
+      else if (roll > deadzone) cmd = 'R';
+      else if (roll < -deadzone) cmd = 'L';
+    }
+    
+    let speed = 0;
+    if (cmd !== 'S') {
+      const maxTilt = Math.min(Math.max(Math.max(absPitch, absRoll), deadzone), 40);
+      const pct = (maxTilt - deadzone) / (40 - deadzone);
+      const limitPct = parseInt(document.getElementById('slide-speed').value) / 100.0;
+      speed = Math.round(350 + (pct * (800 - 350) * limitPct));
+    }
+    
+    sendGestureCmd(cmd, speed);
+  };
+  
+  const startOrientationListener = () => {
+    if (imuActive) return;
+    imuActive = true;
+    window.addEventListener('deviceorientation', handleDeviceOrientation);
+    document.getElementById('btn-imu-toggle').textContent = "STOP TILT STEERING";
+    document.getElementById('btn-imu-toggle').classList.add('active');
+  };
+  
+  const stopOrientationListener = () => {
+    if (!imuActive) return;
+    imuActive = false;
+    window.removeEventListener('deviceorientation', handleDeviceOrientation);
+    document.getElementById('btn-imu-toggle').textContent = "START TILT STEERING";
+    document.getElementById('btn-imu-toggle').classList.remove('active');
+    sendGestureCmd('S', 0);
+    drawImuIndicator(0, 0);
+  };
+  
+  const handleDeviceOrientation = (event) => {
+    if (!imuActive || document.querySelector('.app-container').classList.contains('theme-gesture') === false) return;
+    const pitch = event.beta;
+    const roll = event.gamma;
+    document.getElementById('val-pitch').textContent = Math.round(pitch) + '°';
+    document.getElementById('val-roll').textContent = Math.round(roll) + '°';
+    drawImuIndicator(pitch, roll);
+    processOrientationData(pitch, roll);
+  };
+  
+  const requestOrientationPermission = () => {
+    if (imuActive) {
+      stopOrientationListener();
+      return;
+    }
+    
+    // Check permission logic
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission()
+        .then(response => {
+          if (response === 'granted') {
+            startOrientationListener();
+          } else {
+            alert('Device orientation permission is required for tilt control.');
+          }
+        })
+        .catch(console.error);
+    } else {
+      startOrientationListener();
+    }
+  };
+  
+  // Initialize Websocket connection
+  initWebSocket();
+  
+  // Fallback HTTP status polling loop (if WebSocket is down)
+  setInterval(() => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      fetchTelemetry();
+    }
+  }, 400);
 </script>
 </body>
 </html>
@@ -1156,6 +1551,12 @@ void handleSetMode() {
   strlcpy(rcCmd, "S", sizeof(rcCmd));
   if (m == "rc") {
     carMode = MODE_RC;
+    beep(80);
+  } else if (m == "gesture") {
+    carMode = MODE_GESTURE;
+    beep(80);
+  } else if (m == "follow") {
+    carMode = MODE_FOLLOW;
     beep(80);
   } else {
     carMode = MODE_OA;
@@ -1184,8 +1585,13 @@ void handleServo() {
   server.send(200, "text/plain", "ok");
 }
 void handleStatus() {
+  String modeStr = "oa";
+  if (carMode == MODE_RC) modeStr = "rc";
+  else if (carMode == MODE_GESTURE) modeStr = "gesture";
+  else if (carMode == MODE_FOLLOW) modeStr = "follow";
+  
   String json = "{";
-  json += "\"mode\":\"" + String(carMode == MODE_OA ? "oa" : "rc") + "\",";
+  json += "\"mode\":\"" + modeStr + "\",";
   json += "\"dist\":" + String(lastDistance) + ",";
   json += "\"angle\":" + String(currentServoAngle) + ",";
   json += "\"ir\":" + String(lastIR) + ",";
@@ -1272,20 +1678,49 @@ void setup() {
   server.on("/status", handleStatus);
   server.onNotFound([]() { server.send(404, "text/plain", "Not Found"); });
   server.begin();
+  
+  // Start WebSocket Server
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+  
   beep(100);
-  Serial.println("System initialized. HTTP server running.");
+  Serial.println("System initialized. HTTP & WebSocket servers running.");
 }
 // ─────────────────────────────────────────────────────────────
 //  LOOP
 // ─────────────────────────────────────────────────────────────
 void loop() {
   server.handleClient();   // Always handle incoming HTTP requests
+  webSocket.loop();        // Keep the WebSocket server listening
+  
   // Update servo angle safely in loop context
   if (carMode == MODE_OA) {
     aimServo(TURN_ANGLE_C, false);
-  } else {
+  } else if (carMode == MODE_RC || carMode == MODE_GESTURE) {
     aimServo(rcServoAngle, false);
   }
+  
+  // Broadcast WebSocket telemetry at 150ms intervals
+  static unsigned long lastWsTelemetry = 0;
+  if (millis() - lastWsTelemetry > 150) {
+    lastWsTelemetry = millis();
+    String modeStr = "oa";
+    if (carMode == MODE_RC) modeStr = "rc";
+    else if (carMode == MODE_GESTURE) modeStr = "gesture";
+    else if (carMode == MODE_FOLLOW) modeStr = "follow";
+    
+    String json = "{";
+    json += "\"mode\":\"" + modeStr + "\",";
+    json += "\"dist\":" + String(lastDistance) + ",";
+    json += "\"angle\":" + String(currentServoAngle) + ",";
+    json += "\"ir\":" + String(lastIR) + ",";
+    json += "\"dL\":" + String(dL_dist) + ",";
+    json += "\"dC\":" + String(dC_dist) + ",";
+    json += "\"dR\":" + String(dR_dist);
+    json += "}";
+    webSocket.broadcastTXT(json);
+  }
+  
   if (carMode == MODE_OA) {
     // ── Obstacle Avoidance (Autopilot Mode) ───────────────────
     long dC = distanceCM();
@@ -1314,7 +1749,7 @@ void loop() {
       forward(spd);
     }
     delay(20);
-  } else {
+  } else if (carMode == MODE_RC) {
     // ── RC Web Control Mode ──────────────────────────────────
     // Buzzer control
     digitalWrite(BUZZER, rcHornOn ? HIGH : LOW);
@@ -1328,5 +1763,99 @@ void loop() {
       lastIR = analogRead(IR_PIN);
     }
     delay(15);
+  } else if (carMode == MODE_GESTURE) {
+    // ── Gesture Control Mode (Direct WS inputs control drive) ──
+    // Buzzer control
+    digitalWrite(BUZZER, rcHornOn ? HIGH : LOW);
+    // Update telemetry parameters asynchronously in the background
+    static unsigned long lastSensorUpdate = 0;
+    if (millis() - lastSensorUpdate > 150) {
+      lastSensorUpdate = millis();
+      lastDistance = singlePingCM(15000UL);
+      lastIR = analogRead(IR_PIN);
+    }
+    delay(15);
+  } else if (carMode == MODE_FOLLOW) {
+    // ── Human Following Mode ──────────────────────────────────
+    unsigned long now = millis();
+    if (now - lastFollowTime > 80) { // run logic at ~12Hz
+      lastFollowTime = now;
+      
+      if (!followFound) {
+        // Stop the car while searching
+        stopAll();
+        // Sweep search
+        followAngle += followSweepDir;
+        if (followAngle >= 135) {
+          followAngle = 135;
+          followSweepDir = -8;
+        } else if (followAngle <= 45) {
+          followAngle = 45;
+          followSweepDir = 8;
+        }
+        aimServo(followAngle, false);
+        
+        long d = singlePingCM(15000UL); // 15ms timeout for quick scanning
+        if (d >= 15 && d <= 50) {
+          followFound = true;
+          beep(50); // alert target found
+          lostFollowTime = now;
+        }
+      } else {
+        // Target is found. Check distance at current angle
+        aimServo(followAngle, false);
+        long d = singlePingCM(15000UL);
+        lastDistance = d;
+        
+        if (d >= 15 && d <= 50) {
+          lostFollowTime = now;
+          dC_dist = d; // update for radar representation
+          
+          // Track and adjust servo angle by doing micro-scans
+          aimServo(followAngle + 10, false);
+          long dL_f = singlePingCM(15000UL);
+          
+          aimServo(followAngle - 10, false);
+          long dR_f = singlePingCM(15000UL);
+          
+          // Return servo to target angle
+          aimServo(followAngle, false);
+          
+          if (dL_f < d && dL_f < dR_f) {
+            followAngle = constrain(followAngle + 6, 45, 135);
+          } else if (dR_f < d && dR_f < dL_f) {
+            followAngle = constrain(followAngle - 6, 45, 135);
+          }
+          
+          // Control motor movements based on target servo position and distance
+          if (followAngle > 102) {
+            // Target is to the left, pivot left slowly
+            pivotLeft(OA_TURN * 8 / 10);
+          } else if (followAngle < 78) {
+            // Target is to the right, pivot right slowly
+            pivotRight(OA_TURN * 8 / 10);
+          } else {
+            // Target is centered, move forward/backward to maintain distance
+            if (d > 30) {
+              // Human moved away, follow
+              forward(OA_SPEED);
+            } else if (d < 20) {
+              // Human is too close, back away
+              reverse(OA_REVERSE);
+            } else {
+              // Sweet spot, stay put
+              stopAll();
+            }
+          }
+        } else {
+          // Object out of range. Check if we've lost it for > 1.5 seconds
+          stopAll();
+          if (now - lostFollowTime > 1500) {
+            followFound = false; // go back to sweeping search
+            followAngle = TURN_ANGLE_C; // reset to center
+          }
+        }
+      }
+    }
   }
 }
