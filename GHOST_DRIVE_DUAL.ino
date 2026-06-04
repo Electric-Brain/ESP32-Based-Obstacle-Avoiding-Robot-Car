@@ -1864,62 +1864,60 @@ void loop() {
     delay(15);
   } else if (carMode == MODE_FOLLOW) {
     // ── Human / Hand Following Mode ───────────────────────────
-    // No sweep needed. Put hand (10-32 cm) in front → instant lock-on.
+    // Servo sweeps when searching.  Any object 5-55 cm = instant lock-on.
 
     long d = singlePingCM(20000UL);
     lastDistance = d;
     dC_dist = d;
-
     unsigned long now = millis();
 
-    if (d >= 10 && d <= 32) {
-      // Target in range — track it
-      followFound = true;
+    if (d >= 5 && d <= 55) {
+      // ── Target detected ───────────────────────────────────
+      followFound  = true;
       lostFollowTime = now;
 
-      // Micro-scan ±10° to detect which way target moved
+      // Micro-scan ±10° to find which side target is on
       aimServo(constrain(followAngle + 10, 45, 135), false);
-      delay(40);
-      long dL_s = singlePingCM(15000UL);
+      delay(35);
+      long dL_s = singlePingCM(12000UL);
 
       aimServo(constrain(followAngle - 10, 45, 135), false);
-      delay(40);
-      long dR_s = singlePingCM(15000UL);
+      delay(35);
+      long dR_s = singlePingCM(12000UL);
 
-      aimServo(followAngle, false);
+      aimServo(followAngle, false); // restore
 
-      // Nudge servo toward closer valid reading
-      if (dL_s >= 10 && dL_s < dR_s && dL_s <= 40) {
+      // Nudge servo toward the closer side
+      if (dL_s < dR_s && dL_s >= 5 && dL_s <= 60)
         followAngle = constrain(followAngle + 7, 45, 135);
-      } else if (dR_s >= 10 && dR_s < dL_s && dR_s <= 40) {
+      else if (dR_s < dL_s && dR_s >= 5 && dR_s <= 60)
         followAngle = constrain(followAngle - 7, 45, 135);
-      }
 
-      // Steer based on servo heading
-      if (followAngle > 108) {
-        pivotLeft(OA_TURN * 7 / 10);
-      } else if (followAngle < 72) {
-        pivotRight(OA_TURN * 7 / 10);
+      // Drive based on servo heading
+      if (followAngle > 110) {
+        pivotLeft(OA_TURN * 7 / 10);          // target on left
+      } else if (followAngle < 70) {
+        pivotRight(OA_TURN * 7 / 10);         // target on right
       } else {
-        // Centred — maintain distance
-        if (d > 26)      forward(OA_SPEED);
-        else if (d < 12) reverse(OA_REVERSE);
-        else             stopAll();          // sweet spot 12-26 cm
+        // Centred — hold 10-30 cm sweet spot
+        if      (d > 30) forward(OA_SPEED);
+        else if (d < 10) reverse(OA_REVERSE);
+        else             stopAll();
       }
 
     } else {
-      // Out of range — slow pendulum sweep so the car looks alive & actively searches
+      // ── Nothing in range — sweep servo so the car looks alive ──
       stopAll();
-      if (followFound && (now - lostFollowTime > 400)) {
+      if (followFound && (now - lostFollowTime > 500)) {
         followFound = false;
       }
-      // Step servo each loop at 3°/50ms = ~60°/sec, full arc ~1.3 s
+      // Slow pendulum: 3°/50ms ≈ 1.3 s full arc
       followAngle += followSweepDir;
       if (followAngle >= 130) {
-        followAngle = 130;
+        followAngle  = 130;
         followSweepDir = -3;
       } else if (followAngle <= 50) {
-        followAngle = 50;
+        followAngle  = 50;
         followSweepDir = 3;
       }
       aimServo(followAngle, false);
