@@ -22,7 +22,7 @@ const char* WIFI_PASS = "12345678";
 WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
 // ─── Mode ────────────────────────────────────────────────────
-enum CarMode { MODE_OA, MODE_RC, MODE_GESTURE, MODE_FOLLOW };
+enum CarMode { MODE_OA, MODE_RC, MODE_GESTURE, MODE_FOLLOW, MODE_LINE, MODE_LIGHT, MODE_SOUND };
 CarMode carMode = MODE_OA;   // default: OA on boot
 // ─── Pin Mapping ─────────────────────────────────────────────
 // Left TB6612 (two motors on left side)
@@ -35,8 +35,16 @@ const int STBY_PIN   = 27;
 const int SERVO_PIN  =  4;
 const int TRIG_PIN   =  5;
 const int ECHO_PIN   = 18;   // level-shift to 3.3 V!
-const int IR_PIN     = 34;   // analog input-only
+const int IR_PIN     = 34;   // analog input-only (cliff)
 const int BUZZER     = 15;
+// ─── Extended Sensor Pins ──────────────────────────────────────
+// Connect these to available GPIO on your DevKit board.
+const int LF_IR_L    =  2;   // Line follower LEFT  digital IR (TCRT5000)
+const int LF_IR_C    = 12;   // Line follower CENTER digital IR
+const int LF_IR_R    = 35;   // Line follower RIGHT  (input-only GPIO)
+const int LDR_L_PIN  = 36;   // Left  LDR analog (SVP, input-only)
+const int LDR_R_PIN  = 39;   // Right LDR analog (SVN, input-only)
+const int MIC_PIN    =  0;   // Sound mic ADC (10k pull-up recommended)
 // ─── Motor PWM (LEDC Channels) ───────────────────────────────
 const int PWM_FREQ     = 18000; // quiet high frequency
 const int PWM_RES_BITS = 10;    // 0..1023
@@ -87,6 +95,21 @@ bool followFound = false;
 int followSweepDir = 8;
 unsigned long lastFollowTime = 0;
 unsigned long lostFollowTime = 0;
+// ─── Light Control state ──────────────────────────────────────
+const int LDR_DIFF_THRESH = 200;  // ADC units difference to trigger turn
+const int LDR_SPEED       = 350;
+const int LDR_TURN        = 260;
+// ─── Sound Control state ──────────────────────────────────────
+const int SND_AMP_THRESH  = 200;  // amplitude above mic midpoint (0-4095 ADC)
+const int SND_SPEED       = 420;
+bool sndDriving           = false;
+unsigned long lastSoundBeep = 0;
+// ─── Line Follower constants ───────────────────────────────────
+const int LF_SPEED  = 380;
+const int LF_TURN   = 280;
+// Line sensor reading: HIGH = sees dark/line (for active-low TCRT with pullup)
+// Adjust LF_LINE_ACTIVE to LOW if your module outputs LOW on line detection
+const int LF_LINE_ACTIVE = HIGH;
 // ─────────────────────────────────────────────────────────────
 //  MOTOR DRIVER HELPERS (Compatible with Core v2.x and v3.x)
 // ─────────────────────────────────────────────────────────────
@@ -213,6 +236,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         String m = msg.substring(5);
         stopAll();
         strlcpy(rcCmd, "S", sizeof(rcCmd));
+        sndDriving = false;
         if (m == "rc") {
           carMode = MODE_RC;
           beep(80);
@@ -221,6 +245,18 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           beep(80);
         } else if (m == "follow") {
           carMode = MODE_FOLLOW;
+          beep(80);
+        } else if (m == "line") {
+          carMode = MODE_LINE;
+          aimServo(TURN_ANGLE_C, true);
+          beep(80);
+        } else if (m == "light") {
+          carMode = MODE_LIGHT;
+          aimServo(TURN_ANGLE_C, true);
+          beep(80);
+        } else if (m == "sound") {
+          carMode = MODE_SOUND;
+          aimServo(TURN_ANGLE_C, true);
           beep(80);
         } else {
           carMode = MODE_OA;
@@ -312,6 +348,18 @@ void handleRoot() {
     .app-container.theme-follow {
       --accent-active: var(--accent-follow);
       --accent-active-glow: var(--accent-follow-glow);
+    }
+    .app-container.theme-line {
+      --accent-active: #eab308;
+      --accent-active-glow: rgba(234, 179, 8, 0.25);
+    }
+    .app-container.theme-light {
+      --accent-active: #f97316;
+      --accent-active-glow: rgba(249, 115, 22, 0.25);
+    }
+    .app-container.theme-sound {
+      --accent-active: #ec4899;
+      --accent-active-glow: rgba(236, 72, 153, 0.25);
     }
     /* Header styling */
     .header {
@@ -406,7 +454,11 @@ void handleRoot() {
       border: 1px solid var(--card-border);
       border-radius: 18px;
       padding: 4px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
     }
+    .mode-selector::-webkit-scrollbar { display: none; }
     
     .mode-tab {
       position: relative;
@@ -444,7 +496,7 @@ void handleRoot() {
       position: absolute;
       left: 4px;
       top: 4px;
-      width: calc(25% - 4px);
+      width: calc(100%/7 - 6px);
       height: calc(100% - 8px);
       background: linear-gradient(135deg, var(--accent-success) 0%, rgba(16, 185, 129, 0.8) 100%);
       border-radius: 14px;
@@ -454,19 +506,34 @@ void handleRoot() {
     }
     
     .mode-selector.rc-active .tab-glider {
-      transform: translateX(100%);
+      transform: translateX(calc(100% + 4px));
       background: linear-gradient(135deg, var(--accent-primary) 0%, rgba(99, 102, 241, 0.8) 100%);
       box-shadow: 0 4px 12px var(--accent-primary-glow);
     }
     .mode-selector.gesture-active .tab-glider {
-      transform: translateX(200%);
+      transform: translateX(calc(200% + 8px));
       background: linear-gradient(135deg, var(--accent-gesture) 0%, rgba(6, 182, 212, 0.8) 100%);
       box-shadow: 0 4px 12px var(--accent-gesture-glow);
     }
     .mode-selector.follow-active .tab-glider {
-      transform: translateX(300%);
+      transform: translateX(calc(300% + 12px));
       background: linear-gradient(135deg, var(--accent-follow) 0%, rgba(168, 85, 247, 0.8) 100%);
       box-shadow: 0 4px 12px var(--accent-follow-glow);
+    }
+    .mode-selector.line-active .tab-glider {
+      transform: translateX(calc(400% + 16px));
+      background: linear-gradient(135deg, #eab308 0%, rgba(234, 179, 8, 0.8) 100%);
+      box-shadow: 0 4px 12px rgba(234, 179, 8, 0.25);
+    }
+    .mode-selector.light-active .tab-glider {
+      transform: translateX(calc(500% + 20px));
+      background: linear-gradient(135deg, #f97316 0%, rgba(249, 115, 22, 0.8) 100%);
+      box-shadow: 0 4px 12px rgba(249, 115, 22, 0.25);
+    }
+    .mode-selector.sound-active .tab-glider {
+      transform: translateX(calc(600% + 24px));
+      background: linear-gradient(135deg, #ec4899 0%, rgba(236, 72, 153, 0.8) 100%);
+      box-shadow: 0 4px 12px rgba(236, 72, 153, 0.25);
     }
     /* Telemetry Panel */
     .metrics-container {
@@ -544,11 +611,12 @@ void handleRoot() {
       to { opacity: 1; }
     }
     /* Tab Pages */
-    .panel-oa, .panel-rc, .panel-gesture, .panel-follow {
+    .panel-oa, .panel-rc, .panel-gesture, .panel-follow, .panel-line, .panel-light, .panel-sound {
       display: none;
     }
     
-    .panel-oa.active, .panel-rc.active, .panel-gesture.active, .panel-follow.active {
+    .panel-oa.active, .panel-rc.active, .panel-gesture.active, .panel-follow.active,
+    .panel-line.active, .panel-light.active, .panel-sound.active {
       display: block;
       animation: tab-switch-in 0.3s cubic-bezier(0.25, 1, 0.5, 1) forwards;
     }
@@ -810,6 +878,18 @@ void handleRoot() {
       <svg class='tab-icon' viewBox='0 0 24 24'><path d='M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2'/><circle cx='9' cy='7' r='4'/><path d='M22 9l-3 3 3 3'/></svg>
       <span>FOLLOW</span>
     </button>
+    <button class='mode-tab' id='tab-line' onclick='changeMode("line")'>
+      <svg class='tab-icon' viewBox='0 0 24 24'><path d='M3 12h18M3 6l6 6-6 6M21 6l-6 6 6 6'/></svg>
+      <span>LINE</span>
+    </button>
+    <button class='mode-tab' id='tab-light' onclick='changeMode("light")'>
+      <svg class='tab-icon' viewBox='0 0 24 24'><circle cx='12' cy='12' r='4'/><path d='M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41'/></svg>
+      <span>LIGHT</span>
+    </button>
+    <button class='mode-tab' id='tab-sound' onclick='changeMode("sound")'>
+      <svg class='tab-icon' viewBox='0 0 24 24'><path d='M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z'/><path d='M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8'/></svg>
+      <span>SOUND</span>
+    </button>
     <div class='tab-glider'></div>
   </div>
   
@@ -912,7 +992,73 @@ void handleRoot() {
       </div>
     </div>
   </section>
-  
+
+  <!-- Line Follow Tab Page -->
+  <section class='card panel-line' id='panel-line'>
+    <h2 class='card-title'>LINE FOLLOWER</h2>
+    <div class='oa-status-msg' style='margin-bottom:16px;'>
+      3× TCRT5000 IR sensors track a dark line on a light surface.<br>
+      The car steers left or right to keep the center sensor on the line.
+    </div>
+    <div class='metrics-container'>
+      <div class='metric-widget' style='text-align:center;'>
+        <span class='metric-label'>LEFT SENSOR</span>
+        <span class='metric-value' id='lf-l' style='color:var(--accent-active);'>—</span>
+      </div>
+      <div class='metric-widget' style='text-align:center;'>
+        <span class='metric-label'>CENTER</span>
+        <span class='metric-value' id='lf-c' style='color:var(--accent-active);'>—</span>
+      </div>
+      <div class='metric-widget' style='text-align:center;'>
+        <span class='metric-label'>RIGHT SENSOR</span>
+        <span class='metric-value' id='lf-r' style='color:var(--accent-active);'>—</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Light Control Tab Page -->
+  <section class='card panel-light' id='panel-light'>
+    <h2 class='card-title'>LIGHT CONTROL</h2>
+    <div class='oa-status-msg' style='margin-bottom:16px;'>
+      Two LDRs (left &amp; right) measure ambient brightness.
+      The car autonomously steers toward the brighter light source.
+    </div>
+    <div class='metrics-container'>
+      <div class='metric-widget'>
+        <span class='metric-label'>LEFT LDR</span>
+        <span class='metric-value' id='ldr-l'>—</span>
+        <div class='gauge-bar-container'><div class='gauge-bar' id='ldr-l-bar' style='width:50%'></div></div>
+      </div>
+      <div class='metric-widget'>
+        <span class='metric-label'>RIGHT LDR</span>
+        <span class='metric-value' id='ldr-r'>—</span>
+        <div class='gauge-bar-container'><div class='gauge-bar' id='ldr-r-bar' style='width:50%'></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Sound Control Tab Page -->
+  <section class='card panel-sound' id='panel-sound'>
+    <h2 class='card-title'>SOUND CONTROL</h2>
+    <div class='oa-status-msg' style='margin-bottom:16px;'>
+      Clap or make a loud sound to toggle driving on/off.
+      The microphone listens for amplitude spikes above the threshold.
+    </div>
+    <div class='metrics-container' style='grid-template-columns:1fr;'>
+      <div class='metric-widget' style='align-items:center;padding:20px;'>
+        <span class='metric-label'>MIC AMPLITUDE</span>
+        <span class='metric-value' id='snd-amp' style='font-size:24px;color:var(--accent-active);'>—</span>
+        <div class='gauge-bar-container' style='width:80%;margin-top:10px;'>
+          <div class='gauge-bar' id='snd-bar' style='width:0%;background:var(--accent-active);'></div>
+        </div>
+      </div>
+      <div class='metric-widget' style='text-align:center;'>
+        <span class='metric-label'>DRIVE STATE</span>
+        <span class='metric-value' id='snd-state' style='color:var(--text-muted);'>STANDBY</span>
+      </div>
+    </div>
+  </section>
+
 </div>
 <script>
   let activeCmd = 'S';
@@ -1165,7 +1311,7 @@ void handleRoot() {
   const syncModeTab = (mode) => {
     const container = document.querySelector('.app-container');
     const selector = document.querySelector('.mode-selector');
-    const tabs = ['oa', 'rc', 'gesture', 'follow'];
+    const tabs = ['oa', 'rc', 'gesture', 'follow', 'line', 'light', 'sound'];
     
     tabs.forEach(t => {
       document.getElementById('tab-' + t).classList.remove('active');
@@ -1174,6 +1320,10 @@ void handleRoot() {
     
     document.getElementById('tab-' + mode).classList.add('active');
     document.getElementById('panel-' + mode).classList.add('active');
+    
+    // Scroll active tab into view
+    const activeTab = document.getElementById('tab-' + mode);
+    if (activeTab) activeTab.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
     
     selector.className = 'mode-selector';
     if (mode === 'rc') {
@@ -1186,6 +1336,15 @@ void handleRoot() {
     } else if (mode === 'follow') {
       selector.classList.add('follow-active');
       container.className = 'app-container theme-follow';
+    } else if (mode === 'line') {
+      selector.classList.add('line-active');
+      container.className = 'app-container theme-line';
+    } else if (mode === 'light') {
+      selector.classList.add('light-active');
+      container.className = 'app-container theme-light';
+    } else if (mode === 'sound') {
+      selector.classList.add('sound-active');
+      container.className = 'app-container theme-sound';
     } else {
       container.className = 'app-container theme-oa';
     }
@@ -1257,8 +1416,27 @@ void handleRoot() {
     addRadarTarget(90, data.dC);
     addRadarTarget(30, data.dR);
     
+    // Extended sensor telemetry (line follower, light, sound)
+    if (data.lfL !== undefined) {
+      const col = 'var(--accent-active)';
+      document.getElementById('lf-l').textContent = data.lfL ? 'LINE' : '---';
+      document.getElementById('lf-c').textContent = data.lfC ? 'LINE' : '---';
+      document.getElementById('lf-r').textContent = data.lfR ? 'LINE' : '---';
+    }
+    if (data.ldrL !== undefined) {
+      document.getElementById('ldr-l').textContent = data.ldrL;
+      document.getElementById('ldr-r').textContent = data.ldrR;
+      document.getElementById('ldr-l-bar').style.width = (data.ldrL / 40.95) + '%';
+      document.getElementById('ldr-r-bar').style.width = (data.ldrR / 40.95) + '%';
+    }
+    if (data.sndAmp !== undefined) {
+      document.getElementById('snd-amp').textContent = data.sndAmp;
+      document.getElementById('snd-bar').style.width = Math.min(data.sndAmp / 4, 100) + '%';
+      document.getElementById('snd-state').textContent = data.sndOn ? 'DRIVING' : 'STANDBY';
+      document.getElementById('snd-state').style.color = data.sndOn ? 'var(--accent-active)' : 'var(--text-muted)';
+    }
     // Sync mode tab selection
-    const tabs = ['oa', 'rc', 'gesture', 'follow'];
+    const tabs = ['oa', 'rc', 'gesture', 'follow', 'line', 'light', 'sound'];
     const activeTab = tabs.find(t => document.getElementById('tab-' + t).classList.contains('active'));
     if (data.mode !== activeTab) {
       syncModeTab(data.mode);
@@ -1354,6 +1532,9 @@ void handleRoot() {
     if (container.classList.contains('theme-rc')) rgbColor = '99, 102, 241';
     else if (container.classList.contains('theme-gesture')) rgbColor = '6, 182, 212';
     else if (container.classList.contains('theme-follow')) rgbColor = '168, 85, 247';
+    else if (container.classList.contains('theme-line')) rgbColor = '234, 179, 8';
+    else if (container.classList.contains('theme-light')) rgbColor = '249, 115, 22';
+    else if (container.classList.contains('theme-sound')) rgbColor = '236, 72, 153';
     
     // Sensor flashlight sweeping cone (16deg width)
     const beamAngle = currentAngle * Math.PI / 180;
@@ -1589,6 +1770,9 @@ void handleStatus() {
   if (carMode == MODE_RC) modeStr = "rc";
   else if (carMode == MODE_GESTURE) modeStr = "gesture";
   else if (carMode == MODE_FOLLOW) modeStr = "follow";
+  else if (carMode == MODE_LINE) modeStr = "line";
+  else if (carMode == MODE_LIGHT) modeStr = "light";
+  else if (carMode == MODE_SOUND) modeStr = "sound";
   
   String json = "{";
   json += "\"mode\":\"" + modeStr + "\",";
@@ -1635,6 +1819,10 @@ void setup() {
   pinMode(ECHO_PIN, INPUT);
   pinMode(BUZZER, OUTPUT);
   digitalWrite(BUZZER, LOW);
+  // Extended sensors – Line Follower, LDR, Mic
+  pinMode(LF_IR_L, INPUT_PULLUP);
+  pinMode(LF_IR_C, INPUT_PULLUP);
+  // LF_IR_R, LDR_L_PIN, LDR_R_PIN, MIC_PIN are ADC input-only; no pinMode needed
   // Servo timer allocation to prevent LEDC conflict with motor channels 0-3
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
@@ -1708,6 +1896,9 @@ void loop() {
     if (carMode == MODE_RC) modeStr = "rc";
     else if (carMode == MODE_GESTURE) modeStr = "gesture";
     else if (carMode == MODE_FOLLOW) modeStr = "follow";
+    else if (carMode == MODE_LINE) modeStr = "line";
+    else if (carMode == MODE_LIGHT) modeStr = "light";
+    else if (carMode == MODE_SOUND) modeStr = "sound";
     
     String json = "{";
     json += "\"mode\":\"" + modeStr + "\",";
@@ -1717,6 +1908,19 @@ void loop() {
     json += "\"dL\":" + String(dL_dist) + ",";
     json += "\"dC\":" + String(dC_dist) + ",";
     json += "\"dR\":" + String(dR_dist);
+    // Extended sensor data
+    if (carMode == MODE_LINE) {
+      json += ",\"lfL\":" + String(digitalRead(LF_IR_L) == LF_LINE_ACTIVE ? 1 : 0);
+      json += ",\"lfC\":" + String(digitalRead(LF_IR_C) == LF_LINE_ACTIVE ? 1 : 0);
+      json += ",\"lfR\":" + String(analogRead(LF_IR_R) > 2000 ? 1 : 0);
+    } else if (carMode == MODE_LIGHT) {
+      json += ",\"ldrL\":" + String(analogRead(LDR_L_PIN));
+      json += ",\"ldrR\":" + String(analogRead(LDR_R_PIN));
+    } else if (carMode == MODE_SOUND) {
+      int rawMic = analogRead(MIC_PIN);
+      json += ",\"sndAmp\":" + String(abs(rawMic - 2048));
+      json += ",\"sndOn\":" + String(sndDriving ? 1 : 0);
+    }
     json += "}";
     webSocket.broadcastTXT(json);
   }
@@ -1857,5 +2061,65 @@ void loop() {
         }
       }
     }
+  } else if (carMode == MODE_LINE) {
+    // ── Line Following Mode ───────────────────────────────────
+    bool lL = (digitalRead(LF_IR_L) == LF_LINE_ACTIVE);
+    bool lC = (digitalRead(LF_IR_C) == LF_LINE_ACTIVE);
+    bool lR = (analogRead(LF_IR_R) > 2000);  // threshold for input-only pin
+    lastIR = analogRead(IR_PIN);
+    if (lC && !lL && !lR) {
+      // Center on line: go straight
+      forward(LF_SPEED);
+    } else if (lL && !lR) {
+      // Line shifted left: steer left
+      driveLeft(0); driveRight(LF_SPEED); // gentle arc left
+    } else if (lR && !lL) {
+      // Line shifted right: steer right
+      driveLeft(LF_SPEED); driveRight(0);
+    } else if (lL && lR) {
+      // Both outer sensors see line: junction, keep going straight
+      forward(LF_SPEED);
+    } else {
+      // Lost line: stop and wait
+      stopAll();
+    }
+    delay(20);
+  } else if (carMode == MODE_LIGHT) {
+    // ── Light Control Mode ───────────────────────────────────
+    int lA = analogRead(LDR_L_PIN);
+    int lB = analogRead(LDR_R_PIN);
+    int diff = lA - lB;
+    lastIR = analogRead(IR_PIN);
+    if (abs(diff) > LDR_DIFF_THRESH) {
+      if (diff > 0) {
+        // Left is brighter, steer left
+        driveLeft(0); driveRight(LDR_TURN);
+      } else {
+        // Right is brighter, steer right
+        driveLeft(LDR_TURN); driveRight(0);
+      }
+    } else {
+      // Equal brightness: drive forward
+      forward(LDR_SPEED);
+    }
+    delay(30);
+  } else if (carMode == MODE_SOUND) {
+    // ── Sound Control Mode ──────────────────────────────────
+    int rawMic = analogRead(MIC_PIN);
+    int amplitude = abs(rawMic - 2048);
+    unsigned long now = millis();
+    if (amplitude > SND_AMP_THRESH && now - lastSoundBeep > 600) {
+      // Clap detected! Toggle drive state
+      sndDriving = !sndDriving;
+      lastSoundBeep = now;
+      beep(40);
+      if (sndDriving) { beep(40); } // double beep = ON, single beep = OFF
+    }
+    if (sndDriving) {
+      forward(SND_SPEED);
+    } else {
+      stopAll();
+    }
+    delay(15);
   }
 }
