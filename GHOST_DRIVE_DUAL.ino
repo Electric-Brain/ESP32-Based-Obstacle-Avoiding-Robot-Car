@@ -736,6 +736,29 @@ void handleRoot() {
       border-color: var(--accent-active);
       box-shadow: 0 0 12px #ffffff;
     }
+    /* D-pad fallback buttons */
+    .dpad-btn {
+      background: rgba(6, 182, 212, 0.07);
+      border: 1.5px solid rgba(6, 182, 212, 0.18);
+      border-radius: 12px;
+      color: var(--accent-gesture);
+      font-size: 18px;
+      height: 52px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      outline: none;
+      font-family: inherit;
+      transition: background 0.12s, transform 0.1s;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .dpad-btn:active {
+      background: rgba(6, 182, 212, 0.25);
+      transform: scale(0.93);
+      box-shadow: 0 0 12px rgba(6, 182, 212, 0.3);
+    }
   </style>
 </head>
 <body>
@@ -882,16 +905,38 @@ void handleRoot() {
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; width: 100%; text-align: center; margin-bottom: 16px;">
         <div class="metric-widget" style="padding: 10px;">
           <span class="metric-label">PITCH TILT</span>
-          <span class="metric-value" id="val-pitch">0°</span>
+          <span class="metric-value" id="val-pitch">0&deg;</span>
         </div>
         <div class="metric-widget" style="padding: 10px;">
           <span class="metric-label">ROLL TILT</span>
-          <span class="metric-value" id="val-roll">0°</span>
+          <span class="metric-value" id="val-roll">0&deg;</span>
         </div>
       </div>
       <button class="btn-horn" id="btn-imu-toggle" onclick="requestOrientationPermission()" style="background: rgba(6, 182, 212, 0.08); border-color: rgba(6, 182, 212, 0.2); color: var(--accent-gesture);">
         START TILT STEERING
       </button>
+      <!-- IMU warning shown if browser blocks DeviceOrientation -->
+      <div id="imu-warning" style="display:none; text-align:center; padding:12px 14px; background:rgba(244,63,94,0.07); border:1px solid rgba(244,63,94,0.2); border-radius:14px; margin-top:14px; font-size:10px; line-height:1.7; color:var(--accent-danger);">
+        &#9888; No IMU events detected.<br>
+        Android Chrome blocks sensors on HTTP.<br>
+        <b>Fix:</b> Go to <code style="font-size:9px;">chrome://flags</code> &rarr; search <b>Insecure origins</b> &rarr; add <code style="font-size:9px;">http://192.168.4.1</code><br>
+        Or use the D-pad below as fallback.
+      </div>
+      <!-- Fallback D-pad (always visible, works without IMU) -->
+      <div style="margin-top:18px;">
+        <div style="text-align:center; font-size:9px; font-weight:800; letter-spacing:0.1em; color:var(--text-muted); margin-bottom:10px;">MANUAL FALLBACK PAD</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; max-width:180px; margin:0 auto;">
+          <div></div>
+          <button class="dpad-btn" id="dpf" onpointerdown="gestureManual('F')" onpointerup="gestureManual('S')" onpointerleave="gestureManual('S')">&#9650;</button>
+          <div></div>
+          <button class="dpad-btn" id="dpl" onpointerdown="gestureManual('L')" onpointerup="gestureManual('S')" onpointerleave="gestureManual('S')">&#9668;</button>
+          <button class="dpad-btn" id="dps" onpointerdown="gestureManual('S')">&#9632;</button>
+          <button class="dpad-btn" id="dpr" onpointerdown="gestureManual('R')" onpointerup="gestureManual('S')" onpointerleave="gestureManual('S')">&#9658;</button>
+          <div></div>
+          <button class="dpad-btn" id="dpb" onpointerdown="gestureManual('B')" onpointerup="gestureManual('S')" onpointerleave="gestureManual('S')">&#9660;</button>
+          <div></div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -918,6 +963,7 @@ void handleRoot() {
   let activeCmd = 'S';
   let socket;
   let imuActive = false;
+  let imuEventsReceived = false;
   let lastGestureTime = 0;
   
   // Custom throttle to prevent ESP32 network starvation
@@ -1483,29 +1529,51 @@ void handleRoot() {
   const startOrientationListener = () => {
     if (imuActive) return;
     imuActive = true;
+    imuEventsReceived = false;
     window.addEventListener('deviceorientation', handleDeviceOrientation);
-    document.getElementById('btn-imu-toggle').textContent = "STOP TILT STEERING";
+    document.getElementById('btn-imu-toggle').textContent = 'STOP TILT STEERING';
     document.getElementById('btn-imu-toggle').classList.add('active');
+    // After 2 seconds, check if any events actually arrived
+    setTimeout(() => {
+      if (imuActive && !imuEventsReceived) {
+        const warn = document.getElementById('imu-warning');
+        if (warn) warn.style.display = 'block';
+      }
+    }, 2000);
   };
   
   const stopOrientationListener = () => {
     if (!imuActive) return;
     imuActive = false;
+    imuEventsReceived = false;
     window.removeEventListener('deviceorientation', handleDeviceOrientation);
-    document.getElementById('btn-imu-toggle').textContent = "START TILT STEERING";
+    document.getElementById('btn-imu-toggle').textContent = 'START TILT STEERING';
     document.getElementById('btn-imu-toggle').classList.remove('active');
+    const warn = document.getElementById('imu-warning');
+    if (warn) warn.style.display = 'none';
     sendGestureCmd('S', 0);
     drawImuIndicator(0, 0);
   };
   
   const handleDeviceOrientation = (event) => {
     if (!imuActive || document.querySelector('.app-container').classList.contains('theme-gesture') === false) return;
+    imuEventsReceived = true;
+    // Hide warning if events start coming in
+    const warn = document.getElementById('imu-warning');
+    if (warn && warn.style.display !== 'none') warn.style.display = 'none';
     const pitch = event.beta;
     const roll = event.gamma;
-    document.getElementById('val-pitch').textContent = Math.round(pitch) + '°';
-    document.getElementById('val-roll').textContent = Math.round(roll) + '°';
+    document.getElementById('val-pitch').textContent = Math.round(pitch) + '&deg;';
+    document.getElementById('val-roll').textContent = Math.round(roll) + '&deg;';
     drawImuIndicator(pitch, roll);
     processOrientationData(pitch, roll);
+  };
+  
+  // Fallback D-pad for when browser blocks DeviceOrientation (e.g. Android Chrome on HTTP)
+  const gestureManual = (cmd) => {
+    const spdPct = parseInt(document.getElementById('slide-speed').value);
+    const speed = cmd === 'S' ? 0 : Math.round(350 + ((spdPct - 20) / 80) * (800 - 350));
+    sendGestureCmd(cmd, speed);
   };
   
   const requestOrientationPermission = () => {
@@ -1784,75 +1852,73 @@ void loop() {
       if (!followFound) {
         // Stop the car while searching
         stopAll();
-        // Sweep search
+        // Sweep search - use aimServo with wait=true so servo settles before reading
         followAngle += followSweepDir;
         if (followAngle >= 135) {
           followAngle = 135;
-          followSweepDir = -8;
+          followSweepDir = -6;
         } else if (followAngle <= 45) {
           followAngle = 45;
-          followSweepDir = 8;
+          followSweepDir = 6;
         }
-        aimServo(followAngle, false);
+        aimServo(followAngle, true); // wait=true gives 150ms for servo to settle
         
-        long d = singlePingCM(15000UL); // 15ms timeout for quick scanning
-        if (d >= 15 && d <= 50) {
+        long d = singlePingCM(25000UL); // 25ms timeout ~425cm max range
+        lastDistance = d;
+        if (d >= 5 && d <= 70) {  // widened: catches targets at 5-70cm
           followFound = true;
-          beep(50); // alert target found
+          beep(50);
           lostFollowTime = now;
         }
       } else {
-        // Target is found. Check distance at current angle
+        // Target is found — read distance with servo already at followAngle
         aimServo(followAngle, false);
-        long d = singlePingCM(15000UL);
+        delay(80); // brief settle before read
+        long d = singlePingCM(25000UL);
         lastDistance = d;
         
-        if (d >= 15 && d <= 50) {
+        if (d >= 5 && d <= 70) {
           lostFollowTime = now;
-          dC_dist = d; // update for radar representation
+          dC_dist = d;
           
-          // Track and adjust servo angle by doing micro-scans
-          aimServo(followAngle + 10, false);
-          long dL_f = singlePingCM(15000UL);
+          // Micro-scan ±8° to find direction target moved
+          aimServo(constrain(followAngle + 8, 45, 135), false);
+          delay(60);
+          long dL_f = singlePingCM(20000UL);
           
-          aimServo(followAngle - 10, false);
-          long dR_f = singlePingCM(15000UL);
+          aimServo(constrain(followAngle - 8, 45, 135), false);
+          delay(60);
+          long dR_f = singlePingCM(20000UL);
           
-          // Return servo to target angle
           aimServo(followAngle, false);
           
-          if (dL_f < d && dL_f < dR_f) {
-            followAngle = constrain(followAngle + 6, 45, 135);
-          } else if (dR_f < d && dR_f < dL_f) {
-            followAngle = constrain(followAngle - 6, 45, 135);
+          // Adjust servo angle to keep target centered
+          if (dL_f < d && dL_f < dR_f && dL_f >= 5) {
+            followAngle = constrain(followAngle + 5, 45, 135);
+          } else if (dR_f < d && dR_f < dL_f && dR_f >= 5) {
+            followAngle = constrain(followAngle - 5, 45, 135);
           }
           
-          // Control motor movements based on target servo position and distance
-          if (followAngle > 102) {
-            // Target is to the left, pivot left slowly
+          // Steer motors based on servo angle
+          if (followAngle > 105) {
             pivotLeft(OA_TURN * 8 / 10);
-          } else if (followAngle < 78) {
-            // Target is to the right, pivot right slowly
+          } else if (followAngle < 75) {
             pivotRight(OA_TURN * 8 / 10);
           } else {
-            // Target is centered, move forward/backward to maintain distance
-            if (d > 30) {
-              // Human moved away, follow
-              forward(OA_SPEED);
-            } else if (d < 20) {
-              // Human is too close, back away
-              reverse(OA_REVERSE);
+            // Target centred — control distance
+            if (d > 35) {
+              forward(OA_SPEED);       // too far  → chase
+            } else if (d < 12) {
+              reverse(OA_REVERSE);     // too close → back off
             } else {
-              // Sweet spot, stay put
-              stopAll();
+              stopAll();               // sweet spot 12-35 cm
             }
           }
         } else {
-          // Object out of range. Check if we've lost it for > 1.5 seconds
           stopAll();
           if (now - lostFollowTime > 1500) {
-            followFound = false; // go back to sweeping search
-            followAngle = TURN_ANGLE_C; // reset to center
+            followFound = false;
+            followAngle = TURN_ANGLE_C;
           }
         }
       }
