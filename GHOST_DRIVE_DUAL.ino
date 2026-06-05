@@ -1867,15 +1867,10 @@ void loop() {
     // Locks onto palm under 7cm. Once locked, follows it dynamically. No IR sensor reads.
 
     unsigned long now = millis();
-    static int dither = 0; // 0 = Center, 1 = Left, 2 = Right
-    static long dL = 999;
-    static long dR = 999;
-    static long dC = 999;
 
     if (!followFound) {
       // ── Search State (Sweeping) ───────────────────────────
       stopAll();
-      dither = 0; // reset dither state
 
       // Sweep servo slowly
       followAngle += followSweepDir;
@@ -1904,84 +1899,76 @@ void loop() {
       delay(60);
     } else {
       // ── Locked Tracking State ─────────────────────────────
-      // To prevent servo vibration, we only dither ±8 degrees with adequate settling time
-      if (dither == 0) {
-        // We are at center. Measure center.
-        dC = singlePingCM(12000UL);
-        dC_dist = dC;
-        
-        // Move to left
-        aimServo(constrain(followAngle + 8, 45, 135), false);
-        dither = 1;
-      } 
-      else if (dither == 1) {
-        // We are at left. Measure left.
-        dL = singlePingCM(12000UL);
-        dL_dist = dL;
-        
-        // Move to right
-        aimServo(constrain(followAngle - 8, 45, 135), false);
-        dither = 2;
-      } 
-      else if (dither == 2) {
-        // We are at right. Measure right.
-        dR = singlePingCM(12000UL);
-        dR_dist = dR;
-        
-        // Move to center
-        aimServo(followAngle, false);
-        dither = 0;
-
-        // Process the 3 measurements to track the hand
-        long closestDist = 999;
-        bool targetSeen = false;
-
-        // Find the closest valid detection within tracking range (up to 45 cm)
-        if (dC >= 2 && dC <= 45) { closestDist = dC; targetSeen = true; }
-        if (dL >= 2 && dL <= 45 && dL < closestDist) { closestDist = dL; targetSeen = true; }
-        if (dR >= 2 && dR <= 45 && dR < closestDist) { closestDist = dR; targetSeen = true; }
-
-        if (targetSeen) {
-          lostFollowTime = now;
-          lastDistance = closestDist;
-
-          // Steer the servo angle towards the closer direction
-          if (dL < dR && dL < dC) {
-            followAngle = constrain(followAngle + 6, 50, 130);
-          } else if (dR < dL && dR < dC) {
-            followAngle = constrain(followAngle - 6, 50, 130);
-          }
-        }
-      }
-
+      // Servo points straight at followAngle. No wiggling if hand is steady!
+      aimServo(followAngle, false);
       currentServoAngle = followAngle;
+      
+      long d = singlePingCM(12000UL);
+      dC_dist = d;
 
-      // Motor control runs on every loop iteration to keep movement smooth
-      if (now - lostFollowTime < 800) {
-        // Move the car to follow the servo heading and target distance
+      if (d >= 2 && d <= 35) {
+        // Hand is still directly in front of the servo!
+        lostFollowTime = now;
+        lastDistance = d;
+        dL_dist = 999;
+        dR_dist = 999;
+
+        // Drive to maintain 7cm distance (6 to 9 cm sweet spot)
         if (followAngle > 105) {
           pivotLeft(OA_TURN * 6 / 10);  // slow left turn
         } else if (followAngle < 75) {
           pivotRight(OA_TURN * 6 / 10); // slow right turn
         } else {
-          // Centered: hold sweet spot (6 to 9 cm)
-          if (lastDistance > 9) {
+          if (d > 9) {
             forward(OA_SPEED * 6 / 10); // slow forward
-          } else if (lastDistance < 6) {
+          } else if (d < 6) {
             reverse(OA_REVERSE * 6 / 10); // slow reverse
           } else {
             stopAll(); // perfectly centered at 7-8 cm
           }
         }
       } else {
+        // Hand is lost from center! Scan left and right to re-acquire.
         stopAll();
-        followFound = false;
-        dither = 0; // reset dither
-        beep(50);
+        
+        // Scan Left
+        int angleL = constrain(followAngle + 18, 45, 135);
+        aimServo(angleL, false);
         delay(50);
-        beep(50);
+        long dL_s = singlePingCM(12000UL);
+        dL_dist = dL_s;
+
+        // Scan Right
+        int angleR = constrain(followAngle - 18, 45, 135);
+        aimServo(angleR, false);
+        delay(50);
+        long dR_s = singlePingCM(12000UL);
+        dR_dist = dR_s;
+
+        // Restore center servo position
+        aimServo(followAngle, false);
+
+        if (dL_s >= 2 && dL_s <= 35 && (dR_s > dL_s || dR_s > 35)) {
+          // Hand is on the left
+          followAngle = constrain(followAngle + 12, 50, 130);
+          lostFollowTime = now;
+          lastDistance = dL_s;
+        } else if (dR_s >= 2 && dR_s <= 35 && (dL_s > dR_s || dL_s > 35)) {
+          // Hand is on the right
+          followAngle = constrain(followAngle - 12, 50, 130);
+          lostFollowTime = now;
+          lastDistance = dR_s;
+        } else {
+          // Still lost
+          if (now - lostFollowTime > 800) {
+            followFound = false;
+            beep(50);
+            delay(50);
+            beep(50);
+          }
+        }
       }
-      delay(80); // 80ms loop delay provides smooth movement and settling time
+      delay(40); // 25Hz loop
     }
   }
 }
