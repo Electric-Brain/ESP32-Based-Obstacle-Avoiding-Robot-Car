@@ -1864,22 +1864,27 @@ void loop() {
     delay(15);
   } else if (carMode == MODE_FOLLOW) {
     // ── Human / Hand Following Mode ───────────────────────────
-    // Locks onto palm under 10cm. Once locked, follows it dynamically. No IR sensor reads.
+    // Locks onto palm under 7cm. Once locked, follows it dynamically. No IR sensor reads.
 
     unsigned long now = millis();
+    static int dither = 0; // 0 = Center, 1 = Left, 2 = Right
+    static long dL = 999;
+    static long dR = 999;
+    static long dC = 999;
 
     if (!followFound) {
       // ── Search State (Sweeping) ───────────────────────────
       stopAll();
-      
+      dither = 0; // reset dither state
+
       // Sweep servo slowly
       followAngle += followSweepDir;
       if (followAngle >= 130) {
         followAngle = 130;
-        followSweepDir = -4;
+        followSweepDir = -3;
       } else if (followAngle <= 50) {
         followAngle = 50;
-        followSweepDir = 4;
+        followSweepDir = 3;
       }
       aimServo(followAngle, false);
       currentServoAngle = followAngle;
@@ -1889,82 +1894,94 @@ void loop() {
       lastDistance = d;
       dC_dist = d;
 
-      // Lock on only if hand comes under 10 cm
-      if (d >= 2 && d < 10) {
+      // Lock on only if hand comes under 7 cm
+      if (d >= 2 && d <= 7) {
         followFound = true;
         lostFollowTime = now;
+        lastDistance = d;
         beep(70); // Lock feedback
       }
+      delay(60);
     } else {
       // ── Locked Tracking State ─────────────────────────────
-      // Micro-scan left/right/center to track target position
-      
-      int angleL = constrain(followAngle + 12, 45, 135);
-      aimServo(angleL, false);
-      delay(30);
-      long dL_s = singlePingCM(12000UL);
-      dL_dist = dL_s;
+      // To prevent servo vibration, we only dither ±8 degrees with adequate settling time
+      if (dither == 0) {
+        // We are at center. Measure center.
+        dC = singlePingCM(12000UL);
+        dC_dist = dC;
+        
+        // Move to left
+        aimServo(constrain(followAngle + 8, 45, 135), false);
+        dither = 1;
+      } 
+      else if (dither == 1) {
+        // We are at left. Measure left.
+        dL = singlePingCM(12000UL);
+        dL_dist = dL;
+        
+        // Move to right
+        aimServo(constrain(followAngle - 8, 45, 135), false);
+        dither = 2;
+      } 
+      else if (dither == 2) {
+        // We are at right. Measure right.
+        dR = singlePingCM(12000UL);
+        dR_dist = dR;
+        
+        // Move to center
+        aimServo(followAngle, false);
+        dither = 0;
 
-      int angleR = constrain(followAngle - 12, 45, 135);
-      aimServo(angleR, false);
-      delay(30);
-      long dR_s = singlePingCM(12000UL);
-      dR_dist = dR_s;
+        // Process the 3 measurements to track the hand
+        long closestDist = 999;
+        bool targetSeen = false;
 
-      aimServo(followAngle, false);
-      delay(30);
-      long dC_s = singlePingCM(12000UL);
-      dC_dist = dC_s;
+        // Find the closest valid detection within tracking range (up to 45 cm)
+        if (dC >= 2 && dC <= 45) { closestDist = dC; targetSeen = true; }
+        if (dL >= 2 && dL <= 45 && dL < closestDist) { closestDist = dL; targetSeen = true; }
+        if (dR >= 2 && dR <= 45 && dR < closestDist) { closestDist = dR; targetSeen = true; }
+
+        if (targetSeen) {
+          lostFollowTime = now;
+          lastDistance = closestDist;
+
+          // Steer the servo angle towards the closer direction
+          if (dL < dR && dL < dC) {
+            followAngle = constrain(followAngle + 6, 50, 130);
+          } else if (dR < dL && dR < dC) {
+            followAngle = constrain(followAngle - 6, 50, 130);
+          }
+        }
+      }
+
       currentServoAngle = followAngle;
 
-      // Determine if target is found in any of the three directions
-      long d = 999;
-      bool targetSeen = false;
-      
-      // Find the closest valid detection
-      if (dC_s >= 2 && dC_s <= 55) { d = dC_s; targetSeen = true; }
-      if (dL_s >= 2 && dL_s <= 55 && dL_s < d) { d = dL_s; targetSeen = true; }
-      if (dR_s >= 2 && dR_s <= 55 && dR_s < d) { d = dR_s; targetSeen = true; }
-
-      if (targetSeen) {
-        lostFollowTime = now;
-        lastDistance = d;
-
-        // Steer/Nudge the servo angle towards the closer direction
-        if (dL_s < dR_s && dL_s < dC_s && dL_s <= 55) {
-          followAngle = constrain(followAngle + 8, 45, 135);
-        } else if (dR_s < dL_s && dR_s < dC_s && dR_s <= 55) {
-          followAngle = constrain(followAngle - 8, 45, 135);
-        }
-
+      // Motor control runs on every loop iteration to keep movement smooth
+      if (now - lostFollowTime < 800) {
         // Move the car to follow the servo heading and target distance
         if (followAngle > 105) {
-          pivotLeft(OA_TURN * 7 / 10);  // Target on left, rotate left
+          pivotLeft(OA_TURN * 6 / 10);  // slow left turn
         } else if (followAngle < 75) {
-          pivotRight(OA_TURN * 7 / 10); // Target on right, rotate right
+          pivotRight(OA_TURN * 6 / 10); // slow right turn
         } else {
-          // Centered: hold sweet spot (12 to 25 cm)
-          if (d > 25) {
-            forward(OA_SPEED);
-          } else if (d < 12) {
-            reverse(OA_REVERSE);
+          // Centered: hold sweet spot (6 to 9 cm)
+          if (lastDistance > 9) {
+            forward(OA_SPEED * 6 / 10); // slow forward
+          } else if (lastDistance < 6) {
+            reverse(OA_REVERSE * 6 / 10); // slow reverse
           } else {
-            stopAll();
+            stopAll(); // perfectly centered at 7-8 cm
           }
         }
       } else {
-        // Lost target temporarily
         stopAll();
-        // If lost for more than 700ms, break lock and return to sweep search
-        if (now - lostFollowTime > 700) {
-          followFound = false;
-          beep(40);
-          delay(40);
-          beep(40);
-        }
+        followFound = false;
+        dither = 0; // reset dither
+        beep(50);
+        delay(50);
+        beep(50);
       }
+      delay(80); // 80ms loop delay provides smooth movement and settling time
     }
-
-    delay(30); // 30Hz loop
   }
 }
