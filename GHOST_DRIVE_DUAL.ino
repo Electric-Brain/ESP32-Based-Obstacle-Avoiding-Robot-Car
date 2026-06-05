@@ -1864,22 +1864,28 @@ void loop() {
     delay(15);
   } else if (carMode == MODE_FOLLOW) {
     // ── Human / Hand Following Mode ───────────────────────────
-    // Locks onto palm under 7cm. Once locked, follows it dynamically. No IR sensor reads.
+    // Follows hand forward when detected (5-35 cm). Stops when close (< 5 cm) or lost. No reverse. No IR reads.
 
     unsigned long now = millis();
+    static int dither = 0; // 0 = Center, 1 = Left, 2 = Right
+    static long dL = 999;
+    static long dR = 999;
+    static long dC = 999;
+    static long lastValidDist = 999;
 
     if (!followFound) {
       // ── Search State (Sweeping) ───────────────────────────
       stopAll();
+      dither = 0;
 
       // Sweep servo slowly
       followAngle += followSweepDir;
-      if (followAngle >= 130) {
-        followAngle = 130;
-        followSweepDir = -3;
-      } else if (followAngle <= 50) {
-        followAngle = 50;
-        followSweepDir = 3;
+      if (followAngle >= 120) {
+        followAngle = 120;
+        followSweepDir = -4;
+      } else if (followAngle <= 60) {
+        followAngle = 60;
+        followSweepDir = 4;
       }
       aimServo(followAngle, false);
       currentServoAngle = followAngle;
@@ -1889,86 +1895,93 @@ void loop() {
       lastDistance = d;
       dC_dist = d;
 
-      // Lock on only if hand comes under 7 cm
-      if (d >= 2 && d <= 7) {
+      // Lock on if hand is detected between 5 cm and 35 cm
+      if (d >= 5 && d <= 35) {
         followFound = true;
         lostFollowTime = now;
-        lastDistance = d;
+        lastValidDist = d;
         beep(70); // Lock feedback
       }
       delay(60);
     } else {
-      // ── Locked Tracking State ─────────────────────────────
-      // Servo points straight at followAngle. No wiggling if hand is steady!
-      aimServo(followAngle, false);
-      currentServoAngle = followAngle;
-      
-      long d = singlePingCM(12000UL);
-      dC_dist = d;
-
-      if (d >= 2 && d <= 35) {
-        // Hand is still directly in front of the servo!
-        lostFollowTime = now;
-        lastDistance = d;
-        dL_dist = 999;
-        dR_dist = 999;
-
-        // Drive to maintain 7cm distance (6 to 9 cm sweet spot)
-        if (followAngle > 105) {
-          pivotLeft(OA_TURN * 6 / 10);  // slow left turn
-        } else if (followAngle < 75) {
-          pivotRight(OA_TURN * 6 / 10); // slow right turn
-        } else {
-          if (d > 9) {
-            forward(OA_SPEED * 6 / 10); // slow forward
-          } else if (d < 6) {
-            reverse(OA_REVERSE * 6 / 10); // slow reverse
-          } else {
-            stopAll(); // perfectly centered at 7-8 cm
-          }
-        }
-      } else {
-        // Hand is lost from center! Scan left and right to re-acquire.
-        stopAll();
+      // ── Locked Tracking State (Non-blocking Dither) ─────────────────
+      // We alternate measurements to track left/right without blocking delays
+      if (dither == 0) {
+        // Measure center
+        dC = singlePingCM(12000UL);
+        dC_dist = dC;
         
-        // Scan Left
-        int angleL = constrain(followAngle + 18, 45, 135);
-        aimServo(angleL, false);
-        delay(50);
-        long dL_s = singlePingCM(12000UL);
-        dL_dist = dL_s;
-
-        // Scan Right
-        int angleR = constrain(followAngle - 18, 45, 135);
-        aimServo(angleR, false);
-        delay(50);
-        long dR_s = singlePingCM(12000UL);
-        dR_dist = dR_s;
-
-        // Restore center servo position
+        // Move to left for next loop
+        aimServo(constrain(followAngle + 12, 45, 135), false);
+        dither = 1;
+      } 
+      else if (dither == 1) {
+        // Measure left
+        dL = singlePingCM(12000UL);
+        dL_dist = dL;
+        
+        // Move to right for next loop
+        aimServo(constrain(followAngle - 12, 45, 135), false);
+        dither = 2;
+      } 
+      else if (dither == 2) {
+        // Measure right
+        dR = singlePingCM(12000UL);
+        dR_dist = dR;
+        
+        // Move to center for next loop
         aimServo(followAngle, false);
+        dither = 0;
 
-        if (dL_s >= 2 && dL_s <= 35 && (dR_s > dL_s || dR_s > 35)) {
-          // Hand is on the left
-          followAngle = constrain(followAngle + 12, 50, 130);
+        // Process the 3 measurements
+        long closestDist = 999;
+        bool targetSeen = false;
+
+        // Target must be in follow range (5 to 35 cm)
+        if (dC >= 5 && dC <= 35) { closestDist = dC; targetSeen = true; }
+        if (dL >= 5 && dL <= 35 && dL < closestDist) { closestDist = dL; targetSeen = true; }
+        if (dR >= 5 && dR <= 35 && dR < closestDist) { closestDist = dR; targetSeen = true; }
+
+        if (targetSeen) {
           lostFollowTime = now;
-          lastDistance = dL_s;
-        } else if (dR_s >= 2 && dR_s <= 35 && (dL_s > dR_s || dL_s > 35)) {
-          // Hand is on the right
-          followAngle = constrain(followAngle - 12, 50, 130);
-          lostFollowTime = now;
-          lastDistance = dR_s;
-        } else {
-          // Still lost
-          if (now - lostFollowTime > 800) {
-            followFound = false;
-            beep(50);
-            delay(50);
-            beep(50);
+          lastValidDist = closestDist;
+          lastDistance = closestDist;
+
+          // Steer the servo angle towards the closer direction
+          if (dL < dR && dL < dC) {
+            followAngle = constrain(followAngle + 6, 60, 120);
+          } else if (dR < dL && dR < dC) {
+            followAngle = constrain(followAngle - 6, 60, 120);
           }
         }
       }
-      delay(40); // 25Hz loop
+
+      currentServoAngle = followAngle;
+
+      // Motor control (updated on every loop iteration for responsiveness)
+      if (now - lostFollowTime < 700) {
+        // If hand is too close (< 5cm), stop to prevent crash (no reverse!)
+        if (lastValidDist < 5) {
+          stopAll();
+        } else {
+          // Drive forward and steer toward followAngle
+          if (followAngle > 105) {
+            pivotLeft(OA_TURN * 6 / 10);  // steer left
+          } else if (followAngle < 75) {
+            pivotRight(OA_TURN * 6 / 10); // steer right
+          } else {
+            forward(OA_SPEED * 6 / 10);   // drive straight forward
+          }
+        }
+      } else {
+        stopAll();
+        followFound = false;
+        dither = 0;
+        beep(50);
+        delay(50);
+        beep(50);
+      }
+      delay(60); // 60ms loop delay (no vibration, fast response)
     }
   }
 }
