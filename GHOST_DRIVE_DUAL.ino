@@ -15,6 +15,13 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
+#include <Adafruit_NeoPixel.h>
+
+#define NEOPIXEL_PIN 2
+#define NUM_LEDS     4
+Adafruit_NeoPixel strip(NUM_LEDS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+int carMotionState = 0; // 0=STOP, 1=FWD, 2=REV, 3=LEFT, 4=RIGHT
+
 // ─── WiFi Configuration ──────────────────────────────────────
 #define WIFI_AP_MODE true  // true = creates own hotspot, false = connects to router
 const char* WIFI_SSID = "GhostDrive";
@@ -112,6 +119,7 @@ void setSide(int speed,
 void driveLeft (int s){ setSide(s, L_AIN1, L_AIN2, L_PWMA, CH_L_PWMA, L_A_INVERT, L_BIN1, L_BIN2, L_PWMB, CH_L_PWMB, L_B_INVERT); }
 void driveRight(int s){ setSide(s, R_AIN1, R_AIN2, R_PWMA, CH_R_PWMA, R_A_INVERT, R_BIN1, R_BIN2, R_PWMB, CH_R_PWMB, R_B_INVERT); }
 void stopAll() {
+  carMotionState = 0;
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
   ledcWrite(L_PWMA, 0); ledcWrite(L_PWMB, 0);
   ledcWrite(R_PWMA, 0); ledcWrite(R_PWMB, 0);
@@ -120,10 +128,71 @@ void stopAll() {
   ledcWrite(CH_R_PWMA, 0); ledcWrite(CH_R_PWMB, 0);
 #endif
 }
-void forward   (int s){ driveLeft(+s); driveRight(+s); }
-void reverse   (int s){ driveLeft(-s); driveRight(-s); }
-void pivotLeft (int s){ driveLeft(-s); driveRight(+s); }
-void pivotRight(int s){ driveLeft(+s); driveRight(-s); }
+void forward   (int s){ carMotionState = 1; driveLeft(+s); driveRight(+s); }
+void reverse   (int s){ carMotionState = 2; driveLeft(-s); driveRight(-s); }
+void pivotLeft (int s){ carMotionState = 3; driveLeft(-s); driveRight(+s); }
+void pivotRight(int s){ carMotionState = 4; driveLeft(+s); driveRight(-s); }
+
+// NeoPixel state machine update function
+void updateLEDs() {
+  static unsigned long lastBlinkTime = 0;
+  static bool blinkState = false;
+  unsigned long now = millis();
+  
+  if (now - lastBlinkTime > 300) {
+    lastBlinkTime = now;
+    blinkState = !blinkState;
+  }
+
+  uint32_t colorHeadlight = strip.Color(255, 255, 255); // Headlight: White
+  uint32_t colorTailLightStop = strip.Color(255, 0, 0);  // Tail: Bright Red
+  uint32_t colorTailLightGo = strip.Color(80, 0, 0);     // Tail: Dim Red
+  uint32_t colorBlinkerOn = strip.Color(255, 100, 0);    // Blinker: Orange
+  uint32_t colorBlinkerOff = strip.Color(0, 0, 0);       // Blinker: Off
+  uint32_t colorOff = strip.Color(0, 0, 0);
+
+  uint32_t frontColor = colorHeadlight;
+  uint32_t backColor = colorTailLightStop;
+  uint32_t leftColor = colorOff;
+  uint32_t rightColor = colorOff;
+
+  if (carMotionState == 0) { // STOP
+    frontColor = strip.Color(50, 50, 50); // Dim White running light
+    backColor = colorTailLightStop;       // Bright Red Brake light
+    leftColor = colorOff;
+    rightColor = colorOff;
+  }
+  else if (carMotionState == 1) { // FWD
+    frontColor = colorHeadlight;
+    backColor = colorTailLightGo;
+    leftColor = colorOff;
+    rightColor = colorOff;
+  }
+  else if (carMotionState == 2) { // REV
+    frontColor = strip.Color(50, 50, 50);
+    backColor = strip.Color(255, 255, 255); // White backup light
+    leftColor = colorOff;
+    rightColor = colorOff;
+  }
+  else if (carMotionState == 3) { // LEFT TURN
+    frontColor = colorHeadlight;
+    backColor = colorTailLightGo;
+    leftColor = blinkState ? colorBlinkerOn : colorBlinkerOff;
+    rightColor = colorOff;
+  }
+  else if (carMotionState == 4) { // RIGHT TURN
+    frontColor = colorHeadlight;
+    backColor = colorTailLightGo;
+    leftColor = colorOff;
+    rightColor = blinkState ? colorBlinkerOn : colorBlinkerOff;
+  }
+  
+  strip.setPixelColor(0, frontColor); // Index 0 = Front
+  strip.setPixelColor(1, leftColor);  // Index 1 = Left
+  strip.setPixelColor(2, backColor);  // Index 2 = Back
+  strip.setPixelColor(3, rightColor); // Index 3 = Right
+  strip.show();
+}
 // ─────────────────────────────────────────────────────────────
 //  SENSOR / ACTUATOR HELPERS
 // ─────────────────────────────────────────────────────────────
@@ -169,10 +238,10 @@ void applyRcCmd(const char* cmd, int spd) {
   else if (strcmp(cmd, "B")  == 0) { reverse(spd); }
   else if (strcmp(cmd, "L")  == 0) { pivotLeft(t); }
   else if (strcmp(cmd, "R")  == 0) { pivotRight(t); }
-  else if (strcmp(cmd, "FL") == 0) { driveLeft(spd); driveRight(t); }
-  else if (strcmp(cmd, "FR") == 0) { driveLeft(t);   driveRight(spd); }
-  else if (strcmp(cmd, "BL") == 0) { driveLeft(-t);  driveRight(-spd); }
-  else if (strcmp(cmd, "BR") == 0) { driveLeft(-spd);driveRight(-t); }
+  else if (strcmp(cmd, "FL") == 0) { carMotionState = 1; driveLeft(spd); driveRight(t); }
+  else if (strcmp(cmd, "FR") == 0) { carMotionState = 1; driveLeft(t);   driveRight(spd); }
+  else if (strcmp(cmd, "BL") == 0) { carMotionState = 2; driveLeft(-t);  driveRight(-spd); }
+  else if (strcmp(cmd, "BR") == 0) { carMotionState = 2; driveLeft(-spd);driveRight(-t); }
   else                             { stopAll(); }
 }
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
@@ -1730,6 +1799,10 @@ void setup() {
   // Servo timer allocation to prevent LEDC conflict with motor channels 0-3
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
+  // NeoPixel Strip Initialization
+  strip.begin();
+  strip.show();
+
   // Servo
   scanServo.setPeriodHertz(50);
   scanServo.attach(SERVO_PIN, 500, 2500);
@@ -1784,6 +1857,7 @@ void setup() {
 void loop() {
   server.handleClient();   // Always handle incoming HTTP requests
   webSocket.loop();        // Keep the WebSocket server listening
+  updateLEDs();            // Update NeoPixel headlights/brake lights/blinkers
   
   // Update servo angle safely in loop context
   if (carMode == MODE_OA) {
