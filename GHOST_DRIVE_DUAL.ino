@@ -169,8 +169,8 @@ void updateLEDs() {
   // Determine if running lights are active (tail lights dim red if headlights are on)
   bool runningLightsOn = (webHeadlightMode > 0);
   if (runningLightsOn) {
-    colorBL = strip.Color(40, 0, 0);  // Dim Red tail lights
-    colorBR = strip.Color(40, 0, 0);
+    colorBL = strip.Color(15, 0, 0);  // Very low Red tail lights
+    colorBR = strip.Color(15, 0, 0);
   }
 
   // Brake light logic (bright red)
@@ -181,11 +181,12 @@ void updateLEDs() {
     colorBR = strip.Color(255, 0, 0);
   }
 
-  // Reversing logic (backup lights - bright white)
+  // Reversing logic (backup lights)
   // Reversing states: 2 (REV), 7 (REV_LEFT), 8 (REV_RIGHT)
+  // Left side stays red (dim tail light), Right side is white (reverse light)
   if (carMotionState == 2 || carMotionState == 7 || carMotionState == 8) {
-    colorBL = strip.Color(255, 255, 255);  // White Backup lights
-    colorBR = strip.Color(255, 255, 255);
+    colorBL = runningLightsOn ? strip.Color(15, 0, 0) : strip.Color(0, 0, 0);
+    colorBR = strip.Color(255, 255, 255);  // White Backup light on Right side
   }
 
   // 3. Apply Parking Mode Override
@@ -1932,6 +1933,9 @@ void handleRoot() {
 
   // Initialize Websocket connection
   initWebSocket();
+
+  // Start the active telemetry radar sweep loop
+  renderRadar();
   
   // Fallback HTTP status polling loop (if WebSocket is down)
   setInterval(() => {
@@ -1987,7 +1991,7 @@ void handleRoot() {
         brClass = 'tail-brake';
       }
     } else if (state === 2 || state === 7 || state === 8) { // reversing
-      blClass = 'tail-reverse';
+      blClass = (hl > 0) ? 'tail-dim' : '';
       brClass = 'tail-reverse';
     }
 
