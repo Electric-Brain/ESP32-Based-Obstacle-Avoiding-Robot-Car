@@ -16,16 +16,22 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <Adafruit_NeoPixel.h>
+#include <ESPmDNS.h>
 
 #define NEOPIXEL_PIN 2
 #define NUM_LEDS     4
 Adafruit_NeoPixel strip(NUM_LEDS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
-int carMotionState = 0; // 0=STOP, 1=FWD, 2=REV, 3=LEFT, 4=RIGHT
+int carMotionState = 0;   // 0=STOP, 1=FWD, 2=REV, 3=L_PIVOT, 4=R_PIVOT, 5=F_LEFT, 6=F_RIGHT, 7=B_LEFT, 8=B_RIGHT
+int webHeadlightMode = 1; // 0=Off, 1=Low, 2=High
+bool webHazardsOn = false;
+bool webParkingOn = false;
 
 // ─── WiFi Configuration ──────────────────────────────────────
-#define WIFI_AP_MODE true  // true = creates own hotspot, false = connects to router
-const char* WIFI_SSID = "GhostDrive";
+#define WIFI_AP_MODE false // Connect to phone hotspot
+const char* WIFI_SSID = "22";
 const char* WIFI_PASS = "12345678";
+const char* FALLBACK_SSID = "GhostDrive_AP";
+const char* FALLBACK_PASS = "12345678";
 WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
 // ─── Mode ────────────────────────────────────────────────────
@@ -133,170 +139,119 @@ void reverse   (int s){ carMotionState = 2; driveLeft(-s); driveRight(-s); }
 void pivotLeft (int s){ carMotionState = 3; driveLeft(-s); driveRight(+s); }
 void pivotRight(int s){ carMotionState = 4; driveLeft(+s); driveRight(-s); }
 
-// Helper to generate rainbow color wheel
-uint32_t wheel(byte WheelPos) {
-  WheelPos = 255 - WheelPos;
-  if(WheelPos < 85) {
-    return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
-  }
-  if(WheelPos < 170) {
-    WheelPos -= 85;
-    return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
-  }
-  WheelPos -= 170;
-  return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
-}
-
-// NeoPixel state machine update function
+// NeoPixel state machine update function (Realistic Automotive Simulation)
 void updateLEDs() {
   static unsigned long lastBlinkTime = 0;
   static bool blinkState = false;
   unsigned long now = millis();
   
-  if (now - lastBlinkTime > 300) {
+  if (now - lastBlinkTime > 350) { // Standard car blinker speed (85 blinks/min)
     lastBlinkTime = now;
     blinkState = !blinkState;
   }
 
-  // Smooth breathing coefficient (0.0 to 1.0)
-  float breath = (sin(now / 250.0) + 1.0) / 2.0;
+  // 1. Establish default states for Headlights (FR, FL)
+  uint32_t colorFR = strip.Color(0, 0, 0);
+  uint32_t colorFL = strip.Color(0, 0, 0);
 
-  // Strobe states for autopilot hazard warning (70ms interval)
-  bool strobe = (now / 70) % 2;
-
-  // Basic colors
-  uint32_t colorHeadlight = strip.Color(255, 255, 255); // Headlight: White
-  uint32_t colorTailLightStop = strip.Color(255, 0, 0);  // Tail: Bright Red
-  uint32_t colorTailLightGo = strip.Color(80, 0, 0);     // Tail: Dim Red
-  uint32_t colorBlinkerOn = strip.Color(255, 100, 0);    // Blinker: Orange
-  uint32_t colorReverse = strip.Color(255, 255, 255);    // Reverse: White
-  uint32_t colorOff = strip.Color(0, 0, 0);
-
-  uint32_t colorFR = colorOff;
-  uint32_t colorFL = colorOff;
-  uint32_t colorBL = colorOff;
-  uint32_t colorBR = colorOff;
-
-  // 1. FOLLOW MODE LED PATTERNS
-  if (carMode == MODE_FOLLOW) {
-    if (!followFound) {
-      // Searching: Breathes cyan on headlights, tail lights low red
-      int val = 50 + 205 * breath;
-      uint32_t searchColor = strip.Color(0, val, val); // Cyan breath
-      colorFR = searchColor;
-      colorFL = searchColor;
-      colorBL = colorTailLightGo;
-      colorBR = colorTailLightGo;
-    } else {
-      // Locked: Pulsing magenta on headlights, brake lights normal or turning
-      int val = 80 + 175 * breath;
-      uint32_t lockColor = strip.Color(val, 0, val); // Magenta breath
-      
-      if (followAngle > 105) { // Steering Left
-        colorFR = lockColor;
-        colorFL = blinkState ? colorBlinkerOn : colorOff;
-        colorBL = blinkState ? colorBlinkerOn : colorOff;
-        colorBR = colorTailLightGo;
-      } else if (followAngle < 75) { // Steering Right
-        colorFR = blinkState ? colorBlinkerOn : colorOff;
-        colorFL = lockColor;
-        colorBL = colorTailLightGo;
-        colorBR = blinkState ? colorBlinkerOn : colorOff;
-      } else { // Going straight or stopped
-        colorFR = lockColor;
-        colorFL = lockColor;
-        if (carMotionState == 0) { // stopped
-          colorBL = colorTailLightStop;
-          colorBR = colorTailLightStop;
-        } else {
-          colorBL = colorTailLightGo;
-          colorBR = colorTailLightGo;
-        }
-      }
-    }
+  if (webHeadlightMode == 1) {
+    colorFR = strip.Color(70, 70, 70);      // Low Beam (dim white)
+    colorFL = strip.Color(70, 70, 70);
+  } else if (webHeadlightMode == 2) {
+    colorFR = strip.Color(255, 255, 255);  // High Beam (bright white)
+    colorFL = strip.Color(255, 255, 255);
   }
-  // 2. AUTOPILOT MODE (MODE_OA) LED PATTERNS
-  else if (carMode == MODE_OA) {
-    if (carMotionState == 0) { // stopped/scanning
-      // Police style strobe warning (Alternating red/blue)
-      colorFR = strobe ? strip.Color(255, 0, 0) : strip.Color(0, 0, 255);
-      colorFL = strobe ? strip.Color(0, 0, 255) : strip.Color(255, 0, 0);
-      colorBL = strobe ? strip.Color(255, 0, 0) : strip.Color(0, 0, 255);
-      colorBR = strobe ? strip.Color(0, 0, 255) : strip.Color(255, 0, 0);
-    } 
-    else if (carMotionState == 2) { // reversing
-      // Hazard flashing: flash all orange/red
-      uint32_t hazard = strobe ? strip.Color(255, 50, 0) : colorOff;
-      colorFR = hazard; colorFL = hazard;
-      colorBL = hazard; colorBR = hazard;
-    }
-    else if (carMotionState == 3) { // Left turn
-      colorFR = colorHeadlight;
-      colorFL = blinkState ? colorBlinkerOn : colorOff;
-      colorBL = blinkState ? colorBlinkerOn : colorOff;
-      colorBR = colorTailLightGo;
-    }
-    else if (carMotionState == 4) { // Right turn
-      colorFR = blinkState ? colorBlinkerOn : colorOff;
-      colorFL = colorHeadlight;
-      colorBL = colorTailLightGo;
-      colorBR = blinkState ? colorBlinkerOn : colorOff;
-    }
-    else { // FWD
-      colorFR = colorHeadlight;
-      colorFL = colorHeadlight;
-      colorBL = colorTailLightGo;
-      colorBR = colorTailLightGo;
-    }
+
+  // 2. Establish default states for Tail/Brake/Reverse Lights (BL, BR)
+  uint32_t colorBL = strip.Color(0, 0, 0);
+  uint32_t colorBR = strip.Color(0, 0, 0);
+
+  // Determine if running lights are active (tail lights dim red if headlights are on)
+  bool runningLightsOn = (webHeadlightMode > 0);
+  if (runningLightsOn) {
+    colorBL = strip.Color(40, 0, 0);  // Dim Red tail lights
+    colorBR = strip.Color(40, 0, 0);
   }
-  // 3. RC MODE (MODE_RC) / GESTURE MODE (MODE_GESTURE) LED PATTERNS
-  else {
-    if (carMotionState == 0) {
-      // Stopped: Smooth flowing rainbow animation!
-      byte cycle = (now / 12) % 256;
-      colorFR = wheel((cycle + 0) % 256);
-      colorFL = wheel((cycle + 64) % 256);
-      colorBL = wheel((cycle + 128) % 256);
-      colorBR = wheel((cycle + 192) % 256);
+
+  // Brake light logic (bright red)
+  // Braking/Stopped in FWD-capable modes:
+  // - Stopped (carMotionState == 0)
+  if (carMotionState == 0) {
+    colorBL = strip.Color(255, 0, 0);  // Bright Red Brake lights
+    colorBR = strip.Color(255, 0, 0);
+  }
+
+  // Reversing logic (backup lights - bright white)
+  // Reversing states: 2 (REV), 7 (REV_LEFT), 8 (REV_RIGHT)
+  if (carMotionState == 2 || carMotionState == 7 || carMotionState == 8) {
+    colorBL = strip.Color(255, 255, 255);  // White Backup lights
+    colorBR = strip.Color(255, 255, 255);
+  }
+
+  // 3. Apply Parking Mode Override
+  // Parking mode is active when parked (carMotionState == 0) and webParkingOn is true
+  if (webParkingOn && carMotionState == 0) {
+    // Front parking lights are soft amber if headlights are OFF
+    if (webHeadlightMode == 0) {
+      colorFR = strip.Color(80, 30, 0);   // Soft Amber
+      colorFL = strip.Color(80, 30, 0);
     }
-    else if (carMotionState == 1) { // FWD
-      colorFR = colorHeadlight;
-      colorFL = colorHeadlight;
-      colorBL = colorTailLightGo;
-      colorBR = colorTailLightGo;
+    // Tail lights are soft red (overriding the bright red brakes)
+    colorBL = strip.Color(30, 0, 0);      // Soft Red Tail light
+    colorBR = strip.Color(30, 0, 0);
+  }
+
+  // 4. Blinker / Hazard Overrides (Amber/Orange = 255, 95, 0)
+  uint32_t colorAmber = strip.Color(255, 95, 0);
+
+  // Check if hazards are on
+  if (webHazardsOn) {
+    if (blinkState) {
+      colorFR = colorAmber;
+      colorFL = colorAmber;
+      colorBL = colorAmber;
+      colorBR = colorAmber;
     }
-    else if (carMotionState == 2) { // REV
-      colorFR = strip.Color(50, 50, 50);
-      colorFL = strip.Color(50, 50, 50);
-      colorBL = colorReverse;
-      colorBR = colorReverse;
+  } else {
+    // Left Blinker (states: 3 = pivot left, 5 = forward left, 7 = reverse left)
+    bool leftBlinkerActive = (carMotionState == 3 || carMotionState == 5 || carMotionState == 7);
+    if (leftBlinkerActive && blinkState) {
+      colorFL = colorAmber;
+      colorBL = colorAmber;
     }
-    else if (carMotionState == 3) { // LEFT TURN
-      colorFR = colorHeadlight;
-      colorFL = blinkState ? colorBlinkerOn : colorOff;
-      colorBL = blinkState ? colorBlinkerOn : colorOff;
-      colorBR = colorTailLightGo;
-    }
-    else if (carMotionState == 4) { // RIGHT TURN
-      colorFR = blinkState ? colorBlinkerOn : colorOff;
-      colorFL = colorHeadlight;
-      colorBL = colorTailLightGo;
-      colorBR = blinkState ? colorBlinkerOn : colorOff;
+
+    // Right Blinker (states: 4 = pivot right, 6 = forward right, 8 = reverse right)
+    bool rightBlinkerActive = (carMotionState == 4 || carMotionState == 6 || carMotionState == 8);
+    if (rightBlinkerActive && blinkState) {
+      colorFR = colorAmber;
+      colorBR = colorAmber;
     }
   }
 
-  strip.setPixelColor(0, colorFR); // FR
-  strip.setPixelColor(1, colorFL); // FL
-  strip.setPixelColor(2, colorBL); // BL
-  strip.setPixelColor(3, colorBR); // BR
+  // Write to strip
+  strip.setPixelColor(0, colorFR); // Index 0 = Front Right (FR)
+  strip.setPixelColor(1, colorFL); // Index 1 = Front Left (FL)
+  strip.setPixelColor(2, colorBL); // Index 2 = Back Left (BL)
+  strip.setPixelColor(3, colorBR); // Index 3 = Back Right (BR)
   strip.show();
+}
+
+// Non-blocking delay function that keeps serving clients and updating LEDs
+void delayAndUpdateLEDs(int ms) {
+  unsigned long start = millis();
+  while (millis() - start < (unsigned long)ms) {
+    server.handleClient();
+    webSocket.loop();
+    updateLEDs();
+    delay(1);
+  }
 }
 // ─────────────────────────────────────────────────────────────
 //  SENSOR / ACTUATOR HELPERS
 // ─────────────────────────────────────────────────────────────
 void beep(int ms) {
   digitalWrite(BUZZER, HIGH);
-  delay(ms);
+  delayAndUpdateLEDs(ms);
   digitalWrite(BUZZER, LOW);
 }
 long singlePingCM(unsigned long timeout_us = 20000UL) {
@@ -320,7 +275,7 @@ void aimServo(int angle, bool wait = true) {
     scanServo.write(angle);
     currentServoAngle = angle;
     if (wait) {
-      delay(150); // delay only when waiting is needed (avoid blocking RC loop)
+      delayAndUpdateLEDs(150); // non-blocking wait to avoid freeze during sweep
     }
   }
 }
@@ -336,10 +291,10 @@ void applyRcCmd(const char* cmd, int spd) {
   else if (strcmp(cmd, "B")  == 0) { reverse(spd); }
   else if (strcmp(cmd, "L")  == 0) { pivotLeft(t); }
   else if (strcmp(cmd, "R")  == 0) { pivotRight(t); }
-  else if (strcmp(cmd, "FL") == 0) { carMotionState = 1; driveLeft(spd); driveRight(t); }
-  else if (strcmp(cmd, "FR") == 0) { carMotionState = 1; driveLeft(t);   driveRight(spd); }
-  else if (strcmp(cmd, "BL") == 0) { carMotionState = 2; driveLeft(-t);  driveRight(-spd); }
-  else if (strcmp(cmd, "BR") == 0) { carMotionState = 2; driveLeft(-spd);driveRight(-t); }
+  else if (strcmp(cmd, "FL") == 0) { carMotionState = 5; driveLeft(spd); driveRight(t); }
+  else if (strcmp(cmd, "FR") == 0) { carMotionState = 6; driveLeft(t);   driveRight(spd); }
+  else if (strcmp(cmd, "BL") == 0) { carMotionState = 7; driveLeft(-t);  driveRight(-spd); }
+  else if (strcmp(cmd, "BR") == 0) { carMotionState = 8; driveLeft(-spd);driveRight(-t); }
   else                             { stopAll(); }
 }
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
@@ -376,6 +331,12 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         rcServoAngle = constrain(msg.substring(6).toInt(), 0, 180);
       } else if (msg.startsWith("horn:")) {
         rcHornOn = (msg.substring(5) == "1");
+      } else if (msg.startsWith("led:h:")) {
+        webHeadlightMode = msg.substring(6).toInt();
+      } else if (msg.startsWith("led:hz:")) {
+        webHazardsOn = (msg.substring(7) == "1");
+      } else if (msg.startsWith("led:pk:")) {
+        webParkingOn = (msg.substring(7) == "1");
       } else if (msg.startsWith("mode:")) {
         String m = msg.substring(5);
         stopAll();
@@ -479,6 +440,75 @@ void handleRoot() {
     .app-container.theme-follow {
       --accent-active: var(--accent-follow);
       --accent-active-glow: var(--accent-follow-glow);
+    }
+    /* Car Light Visualizer styling */
+    .car-visualizer {
+      position: relative;
+      width: 110px;
+      height: 160px;
+      margin: 16px auto;
+      border: 2px solid rgba(255, 255, 255, 0.08);
+      border-radius: 20px;
+      background: rgba(16, 18, 35, 0.45);
+      box-shadow: inset 0 0 15px rgba(255, 255, 255, 0.02);
+      transition: all 0.3s ease;
+    }
+    .car-cabin {
+      position: absolute;
+      top: 45px;
+      left: 18px;
+      width: 70px;
+      height: 60px;
+      border: 1.5px solid rgba(255, 255, 255, 0.07);
+      border-radius: 12px 12px 16px 16px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .v-led {
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #111322;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: all 0.15s ease;
+    }
+    .v-led.fl { top: 6px; left: 12px; }
+    .v-led.fr { top: 6px; right: 12px; }
+    .v-led.bl { bottom: 6px; left: 12px; }
+    .v-led.br { bottom: 6px; right: 12px; }
+    
+    /* Headlight States */
+    .v-led.hl-low {
+      background: #e2e8f0;
+      box-shadow: 0 0 8px rgba(226, 232, 240, 0.8), 0 -4px 12px rgba(226, 232, 240, 0.3);
+    }
+    .v-led.hl-high {
+      background: #ffffff;
+      box-shadow: 0 0 15px rgba(255, 255, 255, 1), 0 -8px 20px rgba(255, 255, 255, 0.5);
+    }
+    
+    /* Tail/Brake States */
+    .v-led.tail-dim {
+      background: #ef4444;
+      box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+    }
+    .v-led.tail-brake {
+      background: #ff0000;
+      box-shadow: 0 0 15px rgba(255, 0, 0, 1), 0 4px 12px rgba(255, 0, 0, 0.4);
+    }
+    .v-led.tail-reverse {
+      background: #ffffff;
+      box-shadow: 0 0 12px rgba(255, 255, 255, 0.8), 0 4px 8px rgba(255, 255, 255, 0.3);
+    }
+    
+    /* Parking / Amber States */
+    .v-led.park-front {
+      background: #f59e0b;
+      box-shadow: 0 0 8px rgba(245, 158, 11, 0.7);
+    }
+    .v-led.park-rear {
+      background: #ef4444;
+      box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
     }
     /* Header styling */
     .header {
@@ -964,6 +994,32 @@ void handleRoot() {
       background: rgba(244, 63, 94, 0.28);
       box-shadow: 0 0 18px rgba(244, 63, 94, 0.4);
     }
+    .btn-light {
+      width: 100%;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      color: var(--text-muted);
+      font-family: inherit;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      outline: none;
+      transition: all 0.15s ease;
+    }
+    .btn-light:active, .btn-light.active {
+      background: rgba(99, 102, 241, 0.15);
+      border-color: var(--accent-primary);
+      color: #ffffff;
+      transform: scale(0.97);
+      box-shadow: 0 0 14px var(--accent-primary-glow);
+    }
   </style>
 </head>
 <body>
@@ -1016,6 +1072,40 @@ void handleRoot() {
         <div class='gauge-bar-container'>
           <div class='gauge-bar' id='vector-gauge' style='width: 100%'></div>
         </div>
+      </div>
+    </div>
+  </section>
+  
+  <!-- LED Control Cockpit -->
+  <section class='card'>
+    <h2 class='card-title'>LIGHT CONTROL COCKPIT</h2>
+    <div class='car-visualizer'>
+      <div class='car-cabin'></div>
+      <div class='v-led fl' id='v-fl'></div>
+      <div class='v-led fr' id='v-fr'></div>
+      <div class='v-led bl' id='v-bl'></div>
+      <div class='v-led br' id='v-br'></div>
+    </div>
+    <div style='display: flex; flex-direction: column; gap: 14px;'>
+      <!-- Headlights Selector Button Group -->
+      <div style='display: flex; flex-direction: column; gap: 6px;'>
+        <div style='font-size: 9px; font-weight: 800; color: var(--text-muted); letter-spacing: 0.08em; text-transform: uppercase;'>Headlight Mode</div>
+        <div style='display: flex; gap: 8px;'>
+          <button id='btn-hl-off' class='btn-light' onclick='setHeadlights(0)'>OFF</button>
+          <button id='btn-hl-low' class='btn-light active' onclick='setHeadlights(1)'>LOW BEAM</button>
+          <button id='btn-hl-high' class='btn-light' onclick='setHeadlights(2)'>HIGH BEAM</button>
+        </div>
+      </div>
+      <!-- Toggles for Hazards and Parking -->
+      <div style='display: flex; gap: 12px;'>
+        <button id='btn-hazards' class='btn-light' onclick='toggleHazards()'>
+          <svg viewBox="0 0 24 24" style="width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:2.2;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></svg>
+          HAZARDS
+        </button>
+        <button id='btn-parking' class='btn-light' onclick='toggleParking()'>
+          <svg viewBox="0 0 24 24" style="width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:2.2;"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><path d="M9 17V7h5a3 3 0 0 1 0 6H9"/></svg>
+          PARKING
+        </button>
       </div>
     </div>
   </section>
@@ -1407,6 +1497,7 @@ void handleRoot() {
   
   // Telemetry updates
   const updateTelemetryUI = (data) => {
+    window._lastTelemetry = data;
     // Distance Lidar
     const distVal = document.getElementById('val-dist');
     const distBar = document.getElementById('dist-gauge');
@@ -1789,6 +1880,56 @@ void handleRoot() {
     }
   };
   
+  // Web LED Controls
+  let hazardsActive = false;
+  let parkingActive = false;
+
+  window.setHeadlights = (val) => {
+    document.getElementById('btn-hl-off').classList.remove('active');
+    document.getElementById('btn-hl-low').classList.remove('active');
+    document.getElementById('btn-hl-high').classList.remove('active');
+    if (val === 0) document.getElementById('btn-hl-off').classList.add('active');
+    else if (val === 1) document.getElementById('btn-hl-low').classList.add('active');
+    else if (val === 2) document.getElementById('btn-hl-high').classList.add('active');
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('led:h:' + val);
+    }
+  };
+
+  window.toggleHazards = () => {
+    hazardsActive = !hazardsActive;
+    const btn = document.getElementById('btn-hazards');
+    if (hazardsActive) {
+      btn.classList.add('active');
+      btn.style.color = '#f59e0b';
+      btn.style.borderColor = '#f59e0b';
+    } else {
+      btn.classList.remove('active');
+      btn.style.color = 'var(--text-muted)';
+      btn.style.borderColor = 'rgba(255,255,255,0.08)';
+    }
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('led:hz:' + (hazardsActive ? '1' : '0'));
+    }
+  };
+
+  window.toggleParking = () => {
+    parkingActive = !parkingActive;
+    const btn = document.getElementById('btn-parking');
+    if (parkingActive) {
+      btn.classList.add('active');
+      btn.style.color = '#10b981';
+      btn.style.borderColor = '#10b981';
+    } else {
+      btn.classList.remove('active');
+      btn.style.color = 'var(--text-muted)';
+      btn.style.borderColor = 'rgba(255,255,255,0.08)';
+    }
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send('led:pk:' + (parkingActive ? '1' : '0'));
+    }
+  };
+
   // Initialize Websocket connection
   initWebSocket();
   
@@ -1798,6 +1939,92 @@ void handleRoot() {
       fetchTelemetry();
     }
   }, 400);
+
+  // Live Top-Down Car Visualizer sync logic
+  const updateVirtualCarLEDs = (hl, state, hz, pk) => {
+    const fl = document.getElementById('v-fl');
+    const fr = document.getElementById('v-fr');
+    const bl = document.getElementById('v-bl');
+    const br = document.getElementById('v-br');
+    if (!fl || !fr || !bl || !br) return;
+
+    // Reset classes
+    fl.className = 'v-led fl';
+    fr.className = 'v-led fr';
+    bl.className = 'v-led bl';
+    br.className = 'v-led br';
+
+    // Calculate blink state locally (350ms interval)
+    const blinkOn = Math.floor(Date.now() / 350) % 2 === 0;
+
+    // 1. Front Headlights
+    let flClass = '';
+    let frClass = '';
+    if (hl === 1) {
+      flClass = 'hl-low';
+      frClass = 'hl-low';
+    } else if (hl === 2) {
+      flClass = 'hl-high';
+      frClass = 'hl-high';
+    } else if (pk && state === 0) {
+      flClass = 'park-front';
+      frClass = 'park-front';
+    }
+
+    // 2. Rear Tail/Brake/Reverse Lights
+    let blClass = '';
+    let brClass = '';
+    if (hl > 0) {
+      blClass = 'tail-dim';
+      brClass = 'tail-dim';
+    }
+    if (state === 0) { // stopped/braking
+      if (pk) {
+        blClass = 'park-rear';
+        brClass = 'park-rear';
+      } else {
+        blClass = 'tail-brake';
+        brClass = 'tail-brake';
+      }
+    } else if (state === 2 || state === 7 || state === 8) { // reversing
+      blClass = 'tail-reverse';
+      brClass = 'tail-reverse';
+    }
+
+    if (flClass) fl.classList.add(flClass);
+    if (frClass) fr.classList.add(frClass);
+    if (blClass) bl.classList.add(blClass);
+    if (brClass) br.classList.add(brClass);
+
+    // 3. Blinker / Hazard Overrides
+    if (hz) {
+      if (blinkOn) {
+        fl.className = 'v-led fl park-front';
+        fr.className = 'v-led fr park-front';
+        bl.className = 'v-led bl park-front';
+        br.className = 'v-led br park-front';
+      }
+    } else {
+      // Left Blinker (states: 3, 5, 7)
+      if ((state === 3 || state === 5 || state === 7) && blinkOn) {
+        fl.className = 'v-led fl park-front';
+        bl.className = 'v-led bl park-front';
+      }
+      // Right Blinker (states: 4, 6, 8)
+      if ((state === 4 || state === 6 || state === 8) && blinkOn) {
+        fr.className = 'v-led fr park-front';
+        br.className = 'v-led br park-front';
+      }
+    }
+  };
+
+  // Run update loop at 30fps
+  setInterval(() => {
+    if (window._lastTelemetry) {
+      const d = window._lastTelemetry;
+      updateVirtualCarLEDs(d.hl, d.state, d.hz === 1, d.pk === 1);
+    }
+  }, 33);
 </script>
 </body>
 </html>
@@ -1856,7 +2083,11 @@ void handleStatus() {
   json += "\"ir\":" + String(lastIR) + ",";
   json += "\"dL\":" + String(dL_dist) + ",";
   json += "\"dC\":" + String(dC_dist) + ",";
-  json += "\"dR\":" + String(dR_dist);
+  json += "\"dR\":" + String(dR_dist) + ",";
+  json += "\"state\":" + String(carMotionState) + ",";
+  json += "\"hl\":" + String(webHeadlightMode) + ",";
+  json += "\"hz\":" + String(webHazardsOn ? 1 : 0) + ",";
+  json += "\"pk\":" + String(webParkingOn ? 1 : 0);
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -1924,11 +2155,17 @@ void setup() {
       Serial.print("Connected to WiFi. IP: ");
       Serial.println(WiFi.localIP());
     } else {
-      Serial.println("Connection failed! Defaulting to Hotspot Mode...");
-      WiFi.softAP(WIFI_SSID, WIFI_PASS);
+      Serial.println("Connection failed! Defaulting to local AP Mode...");
+      WiFi.softAP(FALLBACK_SSID, FALLBACK_PASS);
       Serial.print("Access Point started. IP: ");
       Serial.println(WiFi.softAPIP());
     }
+  }
+
+  // Start mDNS Responder (http://ghostdrive.local/)
+  if (MDNS.begin("ghostdrive")) {
+    Serial.println("mDNS responder started (http://ghostdrive.local/)");
+    MDNS.addService("http", "tcp", 80);
   }
   // Web routes
   server.on("/",       handleRoot);
@@ -1980,7 +2217,11 @@ void loop() {
     json += "\"ir\":" + String(lastIR) + ",";
     json += "\"dL\":" + String(dL_dist) + ",";
     json += "\"dC\":" + String(dC_dist) + ",";
-    json += "\"dR\":" + String(dR_dist);
+    json += "\"dR\":" + String(dR_dist) + ",";
+    json += "\"state\":" + String(carMotionState) + ",";
+    json += "\"hl\":" + String(webHeadlightMode) + ",";
+    json += "\"hz\":" + String(webHazardsOn ? 1 : 0) + ",";
+    json += "\"pk\":" + String(webParkingOn ? 1 : 0);
     json += "}";
     webSocket.broadcastTXT(json);
   }
@@ -1995,19 +2236,19 @@ void loop() {
     // Edge/cliff protection
     if (ir < IR_THRESHOLD) {
       stopAll(); beep(60);
-      reverse(OA_REVERSE); delay(REVERSE_MS);
+      reverse(OA_REVERSE); delayAndUpdateLEDs(REVERSE_MS);
       int dir = chooseBestTurn();
       (dir > 0) ? pivotLeft(OA_TURN) : pivotRight(OA_TURN);
-      delay(PIVOT_MS); stopAll();
+      delayAndUpdateLEDs(PIVOT_MS); stopAll();
       return;
     }
     // Ultrasonic collision avoidance
     if (dC <= SAFE_DIST_CM) {
       stopAll(); beep(60);
-      reverse(OA_REVERSE); delay(REVERSE_MS); stopAll();
+      reverse(OA_REVERSE); delayAndUpdateLEDs(REVERSE_MS); stopAll();
       int dir = chooseBestTurn();
       (dir > 0) ? pivotLeft(OA_TURN) : pivotRight(OA_TURN);
-      delay(PIVOT_MS); stopAll();
+      delayAndUpdateLEDs(PIVOT_MS); stopAll();
     } else {
       int spd = (dC >= CLEAR_DIST_CM) ? OA_SPEED : OA_SPEED * 3 / 4;
       forward(spd);
@@ -2071,7 +2312,7 @@ void loop() {
         lastScanTime = 0; // reset scan cooldown
         beep(70); // Lock feedback
       }
-      delay(60);
+      delayAndUpdateLEDs(60);
     } else {
       // ── Locked Tracking State (Quiet search-on-loss with 600ms Cooldown) ──
       // Servo points straight at followAngle. No wiggling if hand is steady!
@@ -2112,14 +2353,14 @@ void loop() {
           // Scan Left
           int angleL = constrain(followAngle + 18, 45, 135);
           aimServo(angleL, false);
-          delay(80); // allow servo to settle
+          delayAndUpdateLEDs(80); // allow servo to settle
           long dL_s = singlePingCM(12000UL);
           dL_dist = dL_s;
 
           // Scan Right
           int angleR = constrain(followAngle - 18, 45, 135);
           aimServo(angleR, false);
-          delay(80); // allow servo to settle
+          delayAndUpdateLEDs(80); // allow servo to settle
           long dR_s = singlePingCM(12000UL);
           dR_dist = dR_s;
 
@@ -2143,11 +2384,11 @@ void loop() {
         if (now - lostFollowTime > 1500) {
           followFound = false;
           beep(50);
-          delay(50);
+          delayAndUpdateLEDs(50);
           beep(50);
         }
       }
-      delay(40); // 25Hz loop
+      delayAndUpdateLEDs(40); // 25Hz loop
     }
   }
 }
