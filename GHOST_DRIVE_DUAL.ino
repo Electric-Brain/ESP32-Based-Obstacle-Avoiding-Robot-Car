@@ -148,49 +148,51 @@ void updateLEDs() {
   uint32_t colorTailLightStop = strip.Color(255, 0, 0);  // Tail: Bright Red
   uint32_t colorTailLightGo = strip.Color(80, 0, 0);     // Tail: Dim Red
   uint32_t colorBlinkerOn = strip.Color(255, 100, 0);    // Blinker: Orange
-  uint32_t colorBlinkerOff = strip.Color(0, 0, 0);       // Blinker: Off
+  uint32_t colorReverse = strip.Color(255, 255, 255);    // Reverse: White
   uint32_t colorOff = strip.Color(0, 0, 0);
 
-  uint32_t frontColor = colorHeadlight;
-  uint32_t backColor = colorTailLightStop;
-  uint32_t leftColor = colorOff;
-  uint32_t rightColor = colorOff;
+  uint32_t colorFR = colorHeadlight;
+  uint32_t colorFL = colorHeadlight;
+  uint32_t colorBL = colorTailLightStop;
+  uint32_t colorBR = colorTailLightStop;
 
   if (carMotionState == 0) { // STOP
-    frontColor = strip.Color(50, 50, 50); // Dim White running light
-    backColor = colorTailLightStop;       // Bright Red Brake light
-    leftColor = colorOff;
-    rightColor = colorOff;
+    colorFR = strip.Color(50, 50, 50); // Dim White running light
+    colorFL = strip.Color(50, 50, 50); // Dim White running light
+    colorBL = colorTailLightStop;       // Bright Red Brake light
+    colorBR = colorTailLightStop;       // Bright Red Brake light
   }
   else if (carMotionState == 1) { // FWD
-    frontColor = colorHeadlight;
-    backColor = colorTailLightGo;
-    leftColor = colorOff;
-    rightColor = colorOff;
+    colorFR = colorHeadlight;
+    colorFL = colorHeadlight;
+    colorBL = colorTailLightGo;
+    colorBR = colorTailLightGo;
   }
   else if (carMotionState == 2) { // REV
-    frontColor = strip.Color(50, 50, 50);
-    backColor = strip.Color(255, 255, 255); // White backup light
-    leftColor = colorOff;
-    rightColor = colorOff;
+    colorFR = strip.Color(50, 50, 50);
+    colorFL = strip.Color(50, 50, 50);
+    colorBL = colorReverse;             // White backup lights
+    colorBR = colorReverse;             // White backup lights
   }
   else if (carMotionState == 3) { // LEFT TURN
-    frontColor = colorHeadlight;
-    backColor = colorTailLightGo;
-    leftColor = blinkState ? colorBlinkerOn : colorBlinkerOff;
-    rightColor = colorOff;
+    // Left side (FL, BL) flashes orange. Right side (FR, BR) behaves normally.
+    colorFR = colorHeadlight;
+    colorFL = blinkState ? colorBlinkerOn : colorOff;
+    colorBL = blinkState ? colorBlinkerOn : colorOff;
+    colorBR = colorTailLightGo;
   }
   else if (carMotionState == 4) { // RIGHT TURN
-    frontColor = colorHeadlight;
-    backColor = colorTailLightGo;
-    leftColor = colorOff;
-    rightColor = blinkState ? colorBlinkerOn : colorBlinkerOff;
+    // Right side (FR, BR) flashes orange. Left side (FL, BL) behaves normally.
+    colorFR = blinkState ? colorBlinkerOn : colorOff;
+    colorFL = colorHeadlight;
+    colorBL = colorTailLightGo;
+    colorBR = blinkState ? colorBlinkerOn : colorOff;
   }
   
-  strip.setPixelColor(0, frontColor); // Index 0 = Front
-  strip.setPixelColor(1, leftColor);  // Index 1 = Left
-  strip.setPixelColor(2, backColor);  // Index 2 = Back
-  strip.setPixelColor(3, rightColor); // Index 3 = Right
+  strip.setPixelColor(0, colorFR); // Index 0 = Front Right (FR)
+  strip.setPixelColor(1, colorFL); // Index 1 = Front Left (FL)
+  strip.setPixelColor(2, colorBL); // Index 2 = Back Left (BL)
+  strip.setPixelColor(3, colorBR); // Index 3 = Back Right (BR)
   strip.show();
 }
 // ─────────────────────────────────────────────────────────────
