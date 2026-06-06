@@ -133,6 +133,20 @@ void reverse   (int s){ carMotionState = 2; driveLeft(-s); driveRight(-s); }
 void pivotLeft (int s){ carMotionState = 3; driveLeft(-s); driveRight(+s); }
 void pivotRight(int s){ carMotionState = 4; driveLeft(+s); driveRight(-s); }
 
+// Helper to generate rainbow color wheel
+uint32_t wheel(byte WheelPos) {
+  WheelPos = 255 - WheelPos;
+  if(WheelPos < 85) {
+    return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
+  }
+  if(WheelPos < 170) {
+    WheelPos -= 85;
+    return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
+  }
+  WheelPos -= 170;
+  return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+}
+
 // NeoPixel state machine update function
 void updateLEDs() {
   static unsigned long lastBlinkTime = 0;
@@ -144,6 +158,13 @@ void updateLEDs() {
     blinkState = !blinkState;
   }
 
+  // Smooth breathing coefficient (0.0 to 1.0)
+  float breath = (sin(now / 250.0) + 1.0) / 2.0;
+
+  // Strobe states for autopilot hazard warning (70ms interval)
+  bool strobe = (now / 70) % 2;
+
+  // Basic colors
   uint32_t colorHeadlight = strip.Color(255, 255, 255); // Headlight: White
   uint32_t colorTailLightStop = strip.Color(255, 0, 0);  // Tail: Bright Red
   uint32_t colorTailLightGo = strip.Color(80, 0, 0);     // Tail: Dim Red
@@ -151,48 +172,123 @@ void updateLEDs() {
   uint32_t colorReverse = strip.Color(255, 255, 255);    // Reverse: White
   uint32_t colorOff = strip.Color(0, 0, 0);
 
-  uint32_t colorFR = colorHeadlight;
-  uint32_t colorFL = colorHeadlight;
-  uint32_t colorBL = colorTailLightStop;
-  uint32_t colorBR = colorTailLightStop;
+  uint32_t colorFR = colorOff;
+  uint32_t colorFL = colorOff;
+  uint32_t colorBL = colorOff;
+  uint32_t colorBR = colorOff;
 
-  if (carMotionState == 0) { // STOP
-    colorFR = strip.Color(50, 50, 50); // Dim White running light
-    colorFL = strip.Color(50, 50, 50); // Dim White running light
-    colorBL = colorTailLightStop;       // Bright Red Brake light
-    colorBR = colorTailLightStop;       // Bright Red Brake light
+  // 1. FOLLOW MODE LED PATTERNS
+  if (carMode == MODE_FOLLOW) {
+    if (!followFound) {
+      // Searching: Breathes cyan on headlights, tail lights low red
+      int val = 50 + 205 * breath;
+      uint32_t searchColor = strip.Color(0, val, val); // Cyan breath
+      colorFR = searchColor;
+      colorFL = searchColor;
+      colorBL = colorTailLightGo;
+      colorBR = colorTailLightGo;
+    } else {
+      // Locked: Pulsing magenta on headlights, brake lights normal or turning
+      int val = 80 + 175 * breath;
+      uint32_t lockColor = strip.Color(val, 0, val); // Magenta breath
+      
+      if (followAngle > 105) { // Steering Left
+        colorFR = lockColor;
+        colorFL = blinkState ? colorBlinkerOn : colorOff;
+        colorBL = blinkState ? colorBlinkerOn : colorOff;
+        colorBR = colorTailLightGo;
+      } else if (followAngle < 75) { // Steering Right
+        colorFR = blinkState ? colorBlinkerOn : colorOff;
+        colorFL = lockColor;
+        colorBL = colorTailLightGo;
+        colorBR = blinkState ? colorBlinkerOn : colorOff;
+      } else { // Going straight or stopped
+        colorFR = lockColor;
+        colorFL = lockColor;
+        if (carMotionState == 0) { // stopped
+          colorBL = colorTailLightStop;
+          colorBR = colorTailLightStop;
+        } else {
+          colorBL = colorTailLightGo;
+          colorBR = colorTailLightGo;
+        }
+      }
+    }
   }
-  else if (carMotionState == 1) { // FWD
-    colorFR = colorHeadlight;
-    colorFL = colorHeadlight;
-    colorBL = colorTailLightGo;
-    colorBR = colorTailLightGo;
+  // 2. AUTOPILOT MODE (MODE_OA) LED PATTERNS
+  else if (carMode == MODE_OA) {
+    if (carMotionState == 0) { // stopped/scanning
+      // Police style strobe warning (Alternating red/blue)
+      colorFR = strobe ? strip.Color(255, 0, 0) : strip.Color(0, 0, 255);
+      colorFL = strobe ? strip.Color(0, 0, 255) : strip.Color(255, 0, 0);
+      colorBL = strobe ? strip.Color(255, 0, 0) : strip.Color(0, 0, 255);
+      colorBR = strobe ? strip.Color(0, 0, 255) : strip.Color(255, 0, 0);
+    } 
+    else if (carMotionState == 2) { // reversing
+      // Hazard flashing: flash all orange/red
+      uint32_t hazard = strobe ? strip.Color(255, 50, 0) : colorOff;
+      colorFR = hazard; colorFL = hazard;
+      colorBL = hazard; colorBR = hazard;
+    }
+    else if (carMotionState == 3) { // Left turn
+      colorFR = colorHeadlight;
+      colorFL = blinkState ? colorBlinkerOn : colorOff;
+      colorBL = blinkState ? colorBlinkerOn : colorOff;
+      colorBR = colorTailLightGo;
+    }
+    else if (carMotionState == 4) { // Right turn
+      colorFR = blinkState ? colorBlinkerOn : colorOff;
+      colorFL = colorHeadlight;
+      colorBL = colorTailLightGo;
+      colorBR = blinkState ? colorBlinkerOn : colorOff;
+    }
+    else { // FWD
+      colorFR = colorHeadlight;
+      colorFL = colorHeadlight;
+      colorBL = colorTailLightGo;
+      colorBR = colorTailLightGo;
+    }
   }
-  else if (carMotionState == 2) { // REV
-    colorFR = strip.Color(50, 50, 50);
-    colorFL = strip.Color(50, 50, 50);
-    colorBL = colorReverse;             // White backup lights
-    colorBR = colorReverse;             // White backup lights
+  // 3. RC MODE (MODE_RC) / GESTURE MODE (MODE_GESTURE) LED PATTERNS
+  else {
+    if (carMotionState == 0) {
+      // Stopped: Smooth flowing rainbow animation!
+      byte cycle = (now / 12) % 256;
+      colorFR = wheel((cycle + 0) % 256);
+      colorFL = wheel((cycle + 64) % 256);
+      colorBL = wheel((cycle + 128) % 256);
+      colorBR = wheel((cycle + 192) % 256);
+    }
+    else if (carMotionState == 1) { // FWD
+      colorFR = colorHeadlight;
+      colorFL = colorHeadlight;
+      colorBL = colorTailLightGo;
+      colorBR = colorTailLightGo;
+    }
+    else if (carMotionState == 2) { // REV
+      colorFR = strip.Color(50, 50, 50);
+      colorFL = strip.Color(50, 50, 50);
+      colorBL = colorReverse;
+      colorBR = colorReverse;
+    }
+    else if (carMotionState == 3) { // LEFT TURN
+      colorFR = colorHeadlight;
+      colorFL = blinkState ? colorBlinkerOn : colorOff;
+      colorBL = blinkState ? colorBlinkerOn : colorOff;
+      colorBR = colorTailLightGo;
+    }
+    else if (carMotionState == 4) { // RIGHT TURN
+      colorFR = blinkState ? colorBlinkerOn : colorOff;
+      colorFL = colorHeadlight;
+      colorBL = colorTailLightGo;
+      colorBR = blinkState ? colorBlinkerOn : colorOff;
+    }
   }
-  else if (carMotionState == 3) { // LEFT TURN
-    // Left side (FL, BL) flashes orange. Right side (FR, BR) behaves normally.
-    colorFR = colorHeadlight;
-    colorFL = blinkState ? colorBlinkerOn : colorOff;
-    colorBL = blinkState ? colorBlinkerOn : colorOff;
-    colorBR = colorTailLightGo;
-  }
-  else if (carMotionState == 4) { // RIGHT TURN
-    // Right side (FR, BR) flashes orange. Left side (FL, BL) behaves normally.
-    colorFR = blinkState ? colorBlinkerOn : colorOff;
-    colorFL = colorHeadlight;
-    colorBL = colorTailLightGo;
-    colorBR = blinkState ? colorBlinkerOn : colorOff;
-  }
-  
-  strip.setPixelColor(0, colorFR); // Index 0 = Front Right (FR)
-  strip.setPixelColor(1, colorFL); // Index 1 = Front Left (FL)
-  strip.setPixelColor(2, colorBL); // Index 2 = Back Left (BL)
-  strip.setPixelColor(3, colorBR); // Index 3 = Back Right (BR)
+
+  strip.setPixelColor(0, colorFR); // FR
+  strip.setPixelColor(1, colorFL); // FL
+  strip.setPixelColor(2, colorBL); // BL
+  strip.setPixelColor(3, colorBR); // BR
   strip.show();
 }
 // ─────────────────────────────────────────────────────────────
