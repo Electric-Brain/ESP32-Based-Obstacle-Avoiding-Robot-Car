@@ -143,11 +143,21 @@ void pivotRight(int s){ carMotionState = 4; driveLeft(+s); driveRight(-s); }
 void updateLEDs() {
   static unsigned long lastBlinkTime = 0;
   static bool blinkState = false;
+  static unsigned long lastMoveTime = 0;
+  static int lastMotionState = 0;
   unsigned long now = millis();
   
   if (now - lastBlinkTime > 350) { // Standard car blinker speed (85 blinks/min)
     lastBlinkTime = now;
     blinkState = !blinkState;
+  }
+
+  // Track the transition from moving to stopped to detect braking
+  if (carMotionState != lastMotionState) {
+    if (lastMotionState != 0 && carMotionState == 0) {
+      lastMoveTime = now; // Car just stopped, start brake light timer
+    }
+    lastMotionState = carMotionState;
   }
 
   // 1. Establish default states for Headlights (FR, FL)
@@ -173,20 +183,24 @@ void updateLEDs() {
     colorBR = strip.Color(15, 0, 0);
   }
 
-  // Brake light logic (bright red)
-  // Braking/Stopped in FWD-capable modes:
-  // - Stopped (carMotionState == 0)
-  if (carMotionState == 0) {
+  // Active braking logic:
+  // Turn on bright red brake lights for 2.0 seconds after stopping from movement
+  bool isBraking = (carMotionState == 0 && (now - lastMoveTime < 2000) && lastMoveTime > 0);
+
+  if (isBraking) {
     colorBL = strip.Color(255, 0, 0);  // Bright Red Brake lights
     colorBR = strip.Color(255, 0, 0);
+  } else if (carMotionState == 0) {
+    // Stays idle: turn off tail lights entirely
+    colorBL = strip.Color(0, 0, 0);
+    colorBR = strip.Color(0, 0, 0);
   }
 
-  // Reversing logic (backup lights)
+  // Reversing logic (taking back) - gets RED rather than white
   // Reversing states: 2 (REV), 7 (REV_LEFT), 8 (REV_RIGHT)
-  // Left side stays red (dim tail light), Right side is white (reverse light)
   if (carMotionState == 2 || carMotionState == 7 || carMotionState == 8) {
-    colorBL = runningLightsOn ? strip.Color(15, 0, 0) : strip.Color(0, 0, 0);
-    colorBR = strip.Color(255, 255, 255);  // White Backup light on Right side
+    colorBL = strip.Color(255, 0, 0);
+    colorBR = strip.Color(255, 0, 0);
   }
 
   // 3. Apply Parking Mode Override
@@ -202,8 +216,8 @@ void updateLEDs() {
     colorBR = strip.Color(30, 0, 0);
   }
 
-  // 4. Blinker / Hazard Overrides (Amber/Orange = 255, 95, 0)
-  uint32_t colorAmber = strip.Color(255, 95, 0);
+  // 4. Blinker / Hazard Overrides (Amber/Orange-Yellow = 255, 140, 0)
+  uint32_t colorAmber = strip.Color(255, 140, 0);
 
   // Check if hazards are on
   if (webHazardsOn) {
@@ -1555,8 +1569,8 @@ void handleRoot() {
     }
     
     // Update radar sweeps target trackers
-    window._liveRadarDist = (data.dist && data.dist < 999) ? data.dist : 0;
-    currentAngle = (data.angle && data.angle > 0) ? data.angle : 90;
+    window._liveRadarDist = (data.dist !== undefined && data.dist < 999) ? data.dist : 0;
+    currentAngle = (data.angle !== undefined) ? data.angle : 90;
     
     // Push target readings to decay array
     addRadarTarget(data.angle, data.dist);
@@ -1605,7 +1619,7 @@ void handleRoot() {
   let targetSpots = []; // holds target markers {angle, dist, life}
   
   const addRadarTarget = (angle, dist) => {
-    if (dist <= 0 || dist >= 250) return;   // show obstacles up to 250 cm
+    if (angle === undefined || dist === undefined || dist <= 0 || dist >= 250) return;   // show obstacles up to 250 cm
     const existing = targetSpots.find(t => Math.abs(t.angle - angle) < 15);
     if (existing) {
       existing.dist = dist;
@@ -1945,12 +1959,25 @@ void handleRoot() {
   }, 400);
 
   // Live Top-Down Car Visualizer sync logic
+  let lastState = 0;
+  let lastStopTime = 0;
+
   const updateVirtualCarLEDs = (hl, state, hz, pk) => {
     const fl = document.getElementById('v-fl');
     const fr = document.getElementById('v-fr');
     const bl = document.getElementById('v-bl');
     const br = document.getElementById('v-br');
     if (!fl || !fr || !bl || !br) return;
+
+    // Track stop transition to determine active braking (2 seconds duration)
+    if (state !== lastState) {
+      if (lastState !== 0 && state === 0) {
+        lastStopTime = Date.now();
+      }
+      lastState = state;
+    }
+
+    const isBraking = (state === 0 && (Date.now() - lastStopTime < 2000) && lastStopTime > 0);
 
     // Reset classes
     fl.className = 'v-led fl';
@@ -1986,13 +2013,16 @@ void handleRoot() {
       if (pk) {
         blClass = 'park-rear';
         brClass = 'park-rear';
-      } else {
+      } else if (isBraking) {
         blClass = 'tail-brake';
         brClass = 'tail-brake';
+      } else {
+        blClass = '';
+        brClass = '';
       }
     } else if (state === 2 || state === 7 || state === 8) { // reversing
-      blClass = (hl > 0) ? 'tail-dim' : '';
-      brClass = 'tail-reverse';
+      blClass = 'tail-brake';
+      brClass = 'tail-brake';
     }
 
     if (flClass) fl.classList.add(flClass);
